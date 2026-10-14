@@ -19,14 +19,14 @@
 <ul class="nav nav-pills mb-4 gap-2" id="setupTabs" role="tablist">
     <li class="nav-item" role="presentation">
         <button
-            class="nav-link fw-semibold {% if active_tab != 'teachers' %}active{% endif %}"
+            class="nav-link fw-semibold {% if active_tab != 'teachers' and active_tab != 'sections' %}active{% endif %}"
             id="subjects-tab"
             data-bs-toggle="pill"
             data-bs-target="#subjects-pane"
             type="button"
             role="tab"
             aria-controls="subjects-pane"
-            aria-selected="{% if active_tab != 'teachers' %}true{% else %}false{% endif %}"
+            aria-selected="{% if active_tab != 'teachers' and active_tab != 'sections' %}true{% else %}false{% endif %}"
         >
             📚 Subjects ({{ subjects|length }})
         </button>
@@ -47,14 +47,16 @@
     </li>
     <li class="nav-item" role="presentation">
         <button
-            class="nav-link text-muted disabled"
+            class="nav-link fw-semibold {% if active_tab == 'sections' %}active{% endif %}"
             id="sections-tab"
+            data-bs-toggle="pill"
+            data-bs-target="#sections-pane"
             type="button"
-            disabled
-            tabindex="-1"
-            aria-disabled="true"
+            role="tab"
+            aria-controls="sections-pane"
+            aria-selected="{% if active_tab == 'sections' %}true{% else %}false{% endif %}"
         >
-            👥 Sections <span class="badge bg-light text-secondary ms-1">Step 2D</span>
+            👥 Sections &amp; Requirements ({{ sections|length }})
         </button>
     </li>
 </ul>
@@ -62,7 +64,7 @@
 <div class="tab-content" id="setupTabContent">
     <!-- Tab 1: Curriculum Subjects -->
     <div
-        class="tab-pane fade {% if active_tab != 'teachers' %}show active{% endif %}"
+        class="tab-pane fade {% if active_tab != 'teachers' and active_tab != 'sections' %}show active{% endif %}"
         id="subjects-pane"
         role="tabpanel"
         aria-labelledby="subjects-tab"
@@ -352,6 +354,211 @@
                                 <div class="display-6 mb-2">👨‍🏫</div>
                                 <h6 class="fw-bold">No teachers registered yet</h6>
                                 <p class="small mb-0">Use the form on the left to add your first faculty member.</p>
+                            </div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Tab 3: Sections & Requirements -->
+    <div
+        class="tab-pane fade {% if active_tab == 'sections' %}show active{% endif %}"
+        id="sections-pane"
+        role="tabpanel"
+        aria-labelledby="sections-tab"
+        tabindex="0"
+    >
+        <div class="row g-4">
+            <!-- Left Column: Forms -->
+            <div class="col-lg-4">
+                <div class="d-flex flex-column gap-4">
+                    <!-- Form 1: Add New Section -->
+                    <div class="card shadow-sm border-0">
+                        <div class="card-header bg-white py-3 border-bottom">
+                            <h5 class="card-title mb-0 fw-semibold text-primary">
+                                <span class="me-1">&#10133;</span> Add New Section
+                            </h5>
+                        </div>
+                        <div class="card-body">
+                            <form action="{{ url_for('add_section') }}" method="POST" autocomplete="off">
+                                <div class="mb-3">
+                                    <label for="section_name" class="form-label fw-semibold">
+                                        Section Name <span class="text-danger">*</span>
+                                    </label>
+                                    <input
+                                        type="text"
+                                        class="form-control text-uppercase"
+                                        id="section_name"
+                                        name="name"
+                                        placeholder="e.g., CSE-A, CSE-B"
+                                        maxlength="50"
+                                        required
+                                    >
+                                    <div class="form-text">Unique student cohort (e.g., CSE-A, Section 1).</div>
+                                </div>
+
+                                <button type="submit" class="btn btn-primary w-100 fw-semibold py-2">
+                                    Save Section
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+
+                    <!-- Form 2: Assign Subject Requirement -->
+                    <div class="card shadow-sm border-0">
+                        <div class="card-header bg-white py-3 border-bottom">
+                            <h5 class="card-title mb-0 fw-semibold text-dark">
+                                <span class="me-1 text-primary">&#128203;</span> Assign Subject Requirement
+                            </h5>
+                        </div>
+                        <div class="card-body">
+                            {% if sections and subjects %}
+                                <form action="{{ url_for('add_requirement') }}" method="POST">
+                                    <div class="mb-3">
+                                        <label for="requirement_section" class="form-label fw-semibold">
+                                            Select Section <span class="text-danger">*</span>
+                                        </label>
+                                        <select class="form-select" id="requirement_section" name="section_id" required>
+                                            <option value="" disabled selected>-- Choose a Section --</option>
+                                            {% for sec in sections %}
+                                                <option value="{{ sec.id }}" {% if sec.total_periods >= 30 %}disabled{% endif %}>
+                                                    {{ sec.name }} ({{ sec.total_periods }}/30 periods{% if sec.total_periods >= 30 %} - Full{% endif %})
+                                                </option>
+                                            {% endfor %}
+                                        </select>
+                                        <div class="form-text">Target student section.</div>
+                                    </div>
+
+                                    <div class="mb-3">
+                                        <label for="requirement_subject" class="form-label fw-semibold">
+                                            Select Subject <span class="text-danger">*</span>
+                                        </label>
+                                        <select class="form-select" id="requirement_subject" name="subject_id" required>
+                                            <option value="" disabled selected>-- Choose a Subject --</option>
+                                            {% for subject in subjects %}
+                                                <option value="{{ subject.id }}">
+                                                    {{ subject.code }} - {{ subject.name }}
+                                                </option>
+                                            {% endfor %}
+                                        </select>
+                                        <div class="form-text">Curriculum course for this section.</div>
+                                    </div>
+
+                                    <div class="mb-4">
+                                        <label for="weekly_periods" class="form-label fw-semibold">
+                                            Weekly Periods <span class="text-danger">*</span>
+                                        </label>
+                                        <input
+                                            type="number"
+                                            class="form-control"
+                                            id="weekly_periods"
+                                            name="weekly_periods"
+                                            min="1"
+                                            max="30"
+                                            placeholder="e.g., 4"
+                                            required
+                                        >
+                                        <div class="form-text">
+                                            Number of class periods per week (1 to 30). Weekly maximum per section is 30 periods.
+                                        </div>
+                                    </div>
+
+                                    <button type="submit" class="btn btn-primary w-100 fw-semibold py-2">
+                                        Save Requirement
+                                    </button>
+                                </form>
+                            {% else %}
+                                <div class="text-center py-4 text-muted">
+                                    <div class="fs-2 mb-2">&#128221;</div>
+                                    <h6 class="fw-semibold">Prerequisites Required</h6>
+                                    <p class="small mb-0">
+                                        {% if not sections and not subjects %}
+                                            Add at least one section and one subject before configuring requirements.
+                                        {% elif not sections %}
+                                            Add at least one section using the form above.
+                                        {% else %}
+                                            Add at least one subject in the Subjects tab first.
+                                        {% endif %}
+                                    </p>
+                                </div>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right Column: Registered Sections List -->
+            <div class="col-lg-8">
+                <div class="card shadow-sm border-0 h-100">
+                    <div class="card-header bg-white py-3 border-bottom d-flex justify-content-between align-items-center">
+                        <h5 class="card-title mb-0 fw-semibold">Registered Sections &amp; Requirements</h5>
+                        <span class="badge bg-primary rounded-pill px-3 py-2">
+                            {{ sections|length }} Total
+                        </span>
+                    </div>
+                    <div class="card-body p-0">
+                        {% if sections %}
+                            <div class="table-responsive">
+                                <table class="table table-hover align-middle mb-0">
+                                    <thead class="table-light">
+                                        <tr>
+                                            <th scope="col" class="ps-4" style="width: 8%;">#</th>
+                                            <th scope="col" style="width: 22%;">Section</th>
+                                            <th scope="col" style="width: 25%;">Weekly Load</th>
+                                            <th scope="col" style="width: 45%;">Assigned Subject Requirements</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {% for sec in sections %}
+                                            <tr>
+                                                <td class="ps-4 text-muted">{{ loop.index }}</td>
+                                                <td>
+                                                    <span class="badge bg-light text-dark border font-monospace px-2 py-1 fs-6">
+                                                        {{ sec.name }}
+                                                    </span>
+                                                </td>
+                                                <td>
+                                                    <div class="d-flex align-items-center gap-2 mb-1">
+                                                        <span class="badge {% if sec.total_periods == 30 %}bg-success{% elif sec.total_periods > 0 %}bg-primary-subtle text-primary border border-primary-subtle{% else %}bg-secondary-subtle text-secondary border{% endif %} px-2 py-1">
+                                                            {{ sec.total_periods }} / 30 periods
+                                                        </span>
+                                                    </div>
+                                                    <div class="progress" style="height: 5px; max-width: 140px;">
+                                                        <div
+                                                            class="progress-bar {% if sec.total_periods == 30 %}bg-success{% else %}bg-primary{% endif %}"
+                                                            role="progressbar"
+                                                            style="width: {{ (sec.total_periods / 30 * 100)|round }}%;"
+                                                            aria-valuenow="{{ sec.total_periods }}"
+                                                            aria-valuemin="0"
+                                                            aria-valuemax="30"
+                                                        ></div>
+                                                    </div>
+                                                </td>
+                                                <td>
+                                                    {% if sec.requirements %}
+                                                        <div class="d-flex flex-wrap gap-2">
+                                                            {% for req in sec.requirements %}
+                                                                <span class="badge bg-light text-dark border px-2 py-1" title="{{ req.name }}">
+                                                                    <strong class="text-primary">{{ req.subject_code }}</strong>: {{ req.weekly_periods }} period{{ 's' if req.weekly_periods > 1 else '' }}/wk
+                                                                </span>
+                                                            {% endfor %}
+                                                        </div>
+                                                    {% else %}
+                                                        <span class="text-muted small fst-italic">No subject requirements set</span>
+                                                    {% endif %}
+                                                </td>
+                                            </tr>
+                                        {% endfor %}
+                                    </tbody>
+                                </table>
+                            </div>
+                        {% else %}
+                            <div class="text-center py-5 text-muted">
+                                <div class="display-6 mb-2">👥</div>
+                                <h6 class="fw-bold">No sections registered yet</h6>
+                                <p class="small mb-0">Use the form on the left to add your first student section (e.g., CSE-A).</p>
                             </div>
                         {% endif %}
                     </div>

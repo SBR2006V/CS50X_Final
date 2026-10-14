@@ -2,7 +2,7 @@
 Smart Routine Generator - Flask Application
 CS50x Final Project
 
-Step 2C: Teacher management and subject qualifications.
+Step 2D: Section management and weekly subject requirements.
 """
 
 import os
@@ -22,7 +22,7 @@ def get_db():
     Reuses get_db_connection() from database.py to ensure:
       1. PRAGMA foreign_keys = ON is executed.
       2. row_factory is set to sqlite3.Row for dictionary-like column access.
-    Supports app.config['DATABASE_PATH'] for test isolation.
+      Supports app.config['DATABASE_PATH'] for test isolation.
     """
     if "db" not in g:
         db_path = app.config.get("DATABASE_PATH", DATABASE_PATH)
@@ -61,7 +61,8 @@ def index():
 def setup():
     """
     Academic Setup route (GET /setup).
-    Retrieves all registered subjects, teachers, and their subject qualifications.
+    Retrieves all registered subjects, teachers, and sections along with their
+    respective qualifications and weekly period requirements.
     """
     db = get_db()
     subjects = db.execute(
@@ -99,11 +100,48 @@ def setup():
         t_dict["subjects"] = teacher_qualifications.get(t["id"], [])
         teachers.append(t_dict)
 
+    # Retrieve all sections ordered by name
+    sections_rows = db.execute(
+        "SELECT id, name FROM sections ORDER BY name ASC;"
+    ).fetchall()
+
+    # Retrieve all section requirements joined with subject details
+    req_rows = db.execute(
+        """
+        SELECT sr.id AS requirement_id, sr.section_id, sr.subject_id, sr.weekly_periods,
+               s.code AS subject_code, s.name AS subject_name
+        FROM section_requirements sr
+        JOIN subjects s ON sr.subject_id = s.id
+        ORDER BY s.code ASC;
+        """
+    ).fetchall()
+
+    # Map requirements to their respective section
+    section_requirements_map = {}
+    for row in req_rows:
+        section_requirements_map.setdefault(row["section_id"], []).append({
+            "id": row["requirement_id"],
+            "subject_id": row["subject_id"],
+            "subject_code": row["subject_code"],
+            "name": row["subject_name"],
+            "weekly_periods": row["weekly_periods"],
+        })
+
+    # Build section objects with embedded requirements and total periods
+    sections = []
+    for sec in sections_rows:
+        sec_dict = dict(sec)
+        sec_reqs = section_requirements_map.get(sec["id"], [])
+        sec_dict["requirements"] = sec_reqs
+        sec_dict["total_periods"] = sum(r["weekly_periods"] for r in sec_reqs)
+        sections.append(sec_dict)
+
     active_tab = request.args.get("tab", "subjects")
     return render_template(
         "setup.html",
         subjects=subjects,
         teachers=teachers,
+        sections=sections,
         active_tab=active_tab,
     )
 
@@ -277,6 +315,151 @@ def add_qualification():
         )
 
     return redirect(url_for("setup", tab="teachers"))
+
+
+@app.route("/sections", methods=["POST"])
+def add_section():
+    """
+    POST route to add a new student section (cohort).
+    Validates name (required), executes parameterized SQL INSERT,
+    handles unique section name collisions gracefully, and redirects back to setup.
+    """
+    name = request.form.get("name", "").strip()
+
+    # 1. Server-side validation: Section name is required
+    if not name:
+        flash("Section name is required.", "danger")
+        return redirect(url_for("setup", tab="sections"))
+
+    db = get_db()
+    # 2. Parameterized SQL INSERT to prevent SQL injection
+    try:
+        db.execute(
+            "INSERT INTO sections (name) VALUES (?);",
+            (name,),
+        )
+        db.commit()
+        flash(f"Section '{name}' added successfully!", "success")
+    except sqlite3.IntegrityError:
+        flash(f"A section with name '{name}' already exists. Please choose a unique name.", "danger")
+
+    return redirect(url_for("setup", tab="sections"))
+
+
+@app.route("/requirements", methods=["POST"])
+@app.route("/section-requirements", methods=["POST"])
+def add_requirement():
+    """
+    POST route to assign weekly subject requirements to a student section.
+    Validates section, subject, and weekly period constraints (1-30 periods,
+    and cumulative maximum of 30 periods per section).
+    Prevents duplicates and executes parameterized SQL INSERT queries.
+    """
+    section_id_raw = request.form.get("section_id", "").strip()
+    subject_id_raw = request.form.get("subject_id", "").strip()
+    weekly_periods_raw = request.form.get("weekly_periods", "").strip()
+
+    # 1. Validate section selection
+    if not section_id_raw:
+        flash("Please select a section.", "danger")
+        return redirect(url_for("setup", tab="sections"))
+
+    try:
+        section_id = int(section_id_raw)
+    except ValueError:
+        flash("Invalid section selected.", "danger")
+        return redirect(url_for("setup", tab="sections"))
+
+    # 2. Validate subject selection
+    if not subject_id_raw:
+        flash("Please select a subject.", "danger")
+        return redirect(url_for("setup", tab="sections"))
+
+    try:
+        subject_id = int(subject_id_raw)
+    except ValueError:
+        flash("Invalid subject selected.", "danger")
+        return redirect(url_for("setup", tab="sections"))
+
+    # 3. Validate weekly periods value
+    if not weekly_periods_raw:
+        flash("Weekly periods count is required.", "danger")
+        return redirect(url_for("setup", tab="sections"))
+
+    try:
+        weekly_periods = int(weekly_periods_raw)
+    except ValueError:
+        flash("Weekly periods must be a valid integer.", "danger")
+        return redirect(url_for("setup", tab="sections"))
+
+    if weekly_periods < 1 or weekly_periods > 30:
+        flash("Weekly periods must be between 1 and 30.", "danger")
+        return redirect(url_for("setup", tab="sections"))
+
+    db = get_db()
+
+    # 4. Verify that the section exists
+    section = db.execute("SELECT id, name FROM sections WHERE id = ?;", (section_id,)).fetchone()
+    if not section:
+        flash("Selected section not found.", "danger")
+        return redirect(url_for("setup", tab="sections"))
+
+    section_name = section["name"]
+
+    # 5. Verify that the subject exists
+    subject = db.execute("SELECT id, code, name FROM subjects WHERE id = ?;", (subject_id,)).fetchone()
+    if not subject:
+        flash("Selected subject not found.", "danger")
+        return redirect(url_for("setup", tab="sections"))
+
+    subject_code = subject["code"]
+
+    # 6. Check for duplicate requirement
+    existing_req = db.execute(
+        "SELECT id, weekly_periods FROM section_requirements WHERE section_id = ? AND subject_id = ?;",
+        (section_id, subject_id),
+    ).fetchone()
+
+    if existing_req:
+        flash(
+            f"Section '{section_name}' is already assigned {existing_req['weekly_periods']} periods for '{subject_code}'.",
+            "warning",
+        )
+        return redirect(url_for("setup", tab="sections"))
+
+    # 7. Check cumulative 30-period limit for the section
+    current_total = db.execute(
+        "SELECT COALESCE(SUM(weekly_periods), 0) AS total FROM section_requirements WHERE section_id = ?;",
+        (section_id,),
+    ).fetchone()["total"]
+
+    if current_total + weekly_periods > 30:
+        remaining = 30 - current_total
+        flash(
+            f"Cannot add {weekly_periods} periods. Section '{section_name}' already has {current_total}/30 periods allocated. Only {remaining} period(s) remaining.",
+            "danger",
+        )
+        return redirect(url_for("setup", tab="sections"))
+
+    # 8. Insert new requirement via parameterized query
+    try:
+        db.execute(
+            "INSERT INTO section_requirements (section_id, subject_id, weekly_periods) VALUES (?, ?, ?);",
+            (section_id, subject_id, weekly_periods),
+        )
+        db.commit()
+        new_total = current_total + weekly_periods
+        flash(
+            f"Assigned {weekly_periods} weekly periods of '{subject_code}' to Section '{section_name}' (Total: {new_total}/30 periods).",
+            "success",
+        )
+    except sqlite3.IntegrityError:
+        flash(
+            f"Could not save requirement: A conflict occurred for Section '{section_name}' and '{subject_code}'.",
+            "danger",
+        )
+
+    return redirect(url_for("setup", tab="sections"))
 
 
 @app.route("/routine")
