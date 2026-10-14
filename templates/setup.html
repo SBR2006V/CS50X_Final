@@ -1,0 +1,363 @@
+{% extends "layout.html" %}
+
+{% block title %}Setup - Smart Routine Generator{% endblock %}
+
+{% block content %}
+<div class="row mb-4 align-items-center">
+    <div class="col-md-8">
+        <h1 class="h3 fw-bold mb-1">Academic Setup</h1>
+        <p class="text-secondary mb-0">Configure curriculum subjects, faculty members, and student cohorts.</p>
+    </div>
+    <div class="col-md-4 text-md-end mt-3 mt-md-0">
+        <a href="{{ url_for('index') }}" class="btn btn-outline-secondary btn-sm">
+            &larr; Back to Dashboard
+        </a>
+    </div>
+</div>
+
+<!-- Setup Navigation Pills -->
+<ul class="nav nav-pills mb-4 gap-2" id="setupTabs" role="tablist">
+    <li class="nav-item" role="presentation">
+        <button
+            class="nav-link fw-semibold {% if active_tab != 'teachers' %}active{% endif %}"
+            id="subjects-tab"
+            data-bs-toggle="pill"
+            data-bs-target="#subjects-pane"
+            type="button"
+            role="tab"
+            aria-controls="subjects-pane"
+            aria-selected="{% if active_tab != 'teachers' %}true{% else %}false{% endif %}"
+        >
+            📚 Subjects ({{ subjects|length }})
+        </button>
+    </li>
+    <li class="nav-item" role="presentation">
+        <button
+            class="nav-link fw-semibold {% if active_tab == 'teachers' %}active{% endif %}"
+            id="teachers-tab"
+            data-bs-toggle="pill"
+            data-bs-target="#teachers-pane"
+            type="button"
+            role="tab"
+            aria-controls="teachers-pane"
+            aria-selected="{% if active_tab == 'teachers' %}true{% else %}false{% endif %}"
+        >
+            👨‍🏫 Teachers &amp; Qualifications ({{ teachers|length }})
+        </button>
+    </li>
+    <li class="nav-item" role="presentation">
+        <button
+            class="nav-link text-muted disabled"
+            id="sections-tab"
+            type="button"
+            disabled
+            tabindex="-1"
+            aria-disabled="true"
+        >
+            👥 Sections <span class="badge bg-light text-secondary ms-1">Step 2D</span>
+        </button>
+    </li>
+</ul>
+
+<div class="tab-content" id="setupTabContent">
+    <!-- Tab 1: Curriculum Subjects -->
+    <div
+        class="tab-pane fade {% if active_tab != 'teachers' %}show active{% endif %}"
+        id="subjects-pane"
+        role="tabpanel"
+        aria-labelledby="subjects-tab"
+        tabindex="0"
+    >
+        <div class="row g-4">
+            <!-- Left Column: Add Subject Form -->
+            <div class="col-lg-4">
+                <div class="card shadow-sm border-0 h-100">
+                    <div class="card-header bg-white py-3 border-bottom">
+                        <h5 class="card-title mb-0 fw-semibold text-primary">
+                            <span class="me-1">&#10133;</span> Add New Subject
+                        </h5>
+                    </div>
+                    <div class="card-body">
+                        <form action="{{ url_for('add_subject') }}" method="POST" autocomplete="off">
+                            <div class="mb-3">
+                                <label for="code" class="form-label fw-semibold">Subject Code <span class="text-danger">*</span></label>
+                                <input
+                                    type="text"
+                                    class="form-control text-uppercase"
+                                    id="code"
+                                    name="code"
+                                    placeholder="e.g., CS101, MATH201"
+                                    maxlength="20"
+                                    required
+                                    autofocus
+                                >
+                                <div class="form-text">Must be unique (e.g., CS101).</div>
+                            </div>
+
+                            <div class="mb-4">
+                                <label for="name" class="form-label fw-semibold">Subject Name <span class="text-danger">*</span></label>
+                                <input
+                                    type="text"
+                                    class="form-control"
+                                    id="name"
+                                    name="name"
+                                    placeholder="e.g., Introduction to Computer Science"
+                                    maxlength="100"
+                                    required
+                                >
+                                <div class="form-text">Full title of the curriculum course.</div>
+                            </div>
+
+                            <button type="submit" class="btn btn-primary w-100 fw-semibold py-2">
+                                Save Subject
+                            </button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right Column: Subject List Table -->
+            <div class="col-lg-8">
+                <div class="card shadow-sm border-0 h-100">
+                    <div class="card-header bg-white py-3 border-bottom d-flex justify-content-between align-items-center">
+                        <h5 class="card-title mb-0 fw-semibold">Registered Subjects</h5>
+                        <span class="badge bg-primary rounded-pill px-3 py-2">
+                            {{ subjects|length }} Total
+                        </span>
+                    </div>
+                    <div class="card-body p-0">
+                        {% if subjects %}
+                            <div class="table-responsive">
+                                <table class="table table-hover align-middle mb-0">
+                                    <thead class="table-light">
+                                        <tr>
+                                            <th scope="col" class="ps-4" style="width: 10%;">#</th>
+                                            <th scope="col" style="width: 30%;">Subject Code</th>
+                                            <th scope="col" style="width: 60%;">Subject Name</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {% for subject in subjects %}
+                                            <tr>
+                                                <td class="ps-4 text-muted">{{ loop.index }}</td>
+                                                <td>
+                                                    <span class="badge bg-light text-dark border font-monospace px-2 py-1">
+                                                        {{ subject['code'] }}
+                                                    </span>
+                                                </td>
+                                                <td class="fw-medium text-dark">{{ subject['name'] }}</td>
+                                            </tr>
+                                        {% endfor %}
+                                    </tbody>
+                                </table>
+                            </div>
+                        {% else %}
+                            <div class="text-center py-5 text-muted">
+                                <div class="display-6 mb-2">📚</div>
+                                <h6 class="fw-bold">No subjects added yet</h6>
+                                <p class="small mb-0">Use the form on the left to add your first curriculum subject.</p>
+                            </div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Tab 2: Teachers & Qualifications -->
+    <div
+        class="tab-pane fade {% if active_tab == 'teachers' %}show active{% endif %}"
+        id="teachers-pane"
+        role="tabpanel"
+        aria-labelledby="teachers-tab"
+        tabindex="0"
+    >
+        <div class="row g-4">
+            <!-- Left Column: Forms -->
+            <div class="col-lg-4">
+                <div class="d-flex flex-column gap-4">
+                    <!-- Form 1: Add New Teacher -->
+                    <div class="card shadow-sm border-0">
+                        <div class="card-header bg-white py-3 border-bottom">
+                            <h5 class="card-title mb-0 fw-semibold text-primary">
+                                <span class="me-1">&#10133;</span> Add New Teacher
+                            </h5>
+                        </div>
+                        <div class="card-body">
+                            <form action="{{ url_for('add_teacher') }}" method="POST" autocomplete="off">
+                                <div class="mb-3">
+                                    <label for="teacher_name" class="form-label fw-semibold">
+                                        Teacher Name <span class="text-danger">*</span>
+                                    </label>
+                                    <input
+                                        type="text"
+                                        class="form-control"
+                                        id="teacher_name"
+                                        name="name"
+                                        placeholder="e.g., Dr. Ada Lovelace"
+                                        maxlength="100"
+                                        required
+                                    >
+                                    <div class="form-text">Full name of the faculty member.</div>
+                                </div>
+
+                                <div class="mb-4">
+                                    <label for="teacher_email" class="form-label fw-semibold">
+                                        Email Address <span class="text-muted small fw-normal">(Optional)</span>
+                                    </label>
+                                    <input
+                                        type="email"
+                                        class="form-control"
+                                        id="teacher_email"
+                                        name="email"
+                                        placeholder="e.g., ada@example.edu"
+                                        maxlength="100"
+                                    >
+                                    <div class="form-text">Optional. Must be unique if provided.</div>
+                                </div>
+
+                                <button type="submit" class="btn btn-primary w-100 fw-semibold py-2">
+                                    Save Teacher
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+
+                    <!-- Form 2: Assign Subject Qualifications -->
+                    <div class="card shadow-sm border-0">
+                        <div class="card-header bg-white py-3 border-bottom">
+                            <h5 class="card-title mb-0 fw-semibold text-success">
+                                <span class="me-1">&#127891;</span> Assign Subject Qualifications
+                            </h5>
+                        </div>
+                        <div class="card-body">
+                            {% if teachers and subjects %}
+                                <form action="{{ url_for('add_qualification') }}" method="POST">
+                                    <div class="mb-3">
+                                        <label for="qualification_teacher" class="form-label fw-semibold">
+                                            Select Teacher <span class="text-danger">*</span>
+                                        </label>
+                                        <select class="form-select" id="qualification_teacher" name="teacher_id" required>
+                                            <option value="" disabled selected>-- Choose a Teacher --</option>
+                                            {% for teacher in teachers %}
+                                                <option value="{{ teacher.id }}">
+                                                    {{ teacher.name }}{% if teacher.email %} ({{ teacher.email }}){% endif %}
+                                                </option>
+                                            {% endfor %}
+                                        </select>
+                                        <div class="form-text">Faculty member receiving qualification.</div>
+                                    </div>
+
+                                    <div class="mb-4">
+                                        <label for="qualification_subjects" class="form-label fw-semibold">
+                                            Qualified Subjects <span class="text-danger">*</span>
+                                        </label>
+                                        <select
+                                            class="form-select"
+                                            id="qualification_subjects"
+                                            name="subject_ids"
+                                            multiple
+                                            size="4"
+                                            required
+                                        >
+                                            {% for subject in subjects %}
+                                                <option value="{{ subject.id }}">
+                                                    {{ subject.code }} - {{ subject.name }}
+                                                </option>
+                                            {% endfor %}
+                                        </select>
+                                        <div class="form-text">Hold <kbd>Ctrl</kbd> (Windows) or <kbd>Cmd</kbd> (Mac) to select multiple.</div>
+                                    </div>
+
+                                    <button type="submit" class="btn btn-success w-100 fw-semibold py-2">
+                                        Save Qualifications
+                                    </button>
+                                </form>
+                            {% else %}
+                                <div class="text-center py-4 text-muted">
+                                    <div class="fs-2 mb-2">&#128221;</div>
+                                    <h6 class="fw-semibold">Prerequisites Required</h6>
+                                    <p class="small mb-0">
+                                        {% if not teachers and not subjects %}
+                                            Add at least one teacher and one subject before assigning qualifications.
+                                        {% elif not teachers %}
+                                            Add at least one teacher above before assigning qualifications.
+                                        {% else %}
+                                            Add at least one subject in the Subjects tab before assigning qualifications.
+                                        {% endif %}
+                                    </p>
+                                </div>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right Column: Registered Teachers List -->
+            <div class="col-lg-8">
+                <div class="card shadow-sm border-0 h-100">
+                    <div class="card-header bg-white py-3 border-bottom d-flex justify-content-between align-items-center">
+                        <h5 class="card-title mb-0 fw-semibold">Registered Teachers</h5>
+                        <span class="badge bg-success rounded-pill px-3 py-2">
+                            {{ teachers|length }} Total
+                        </span>
+                    </div>
+                    <div class="card-body p-0">
+                        {% if teachers %}
+                            <div class="table-responsive">
+                                <table class="table table-hover align-middle mb-0">
+                                    <thead class="table-light">
+                                        <tr>
+                                            <th scope="col" class="ps-4" style="width: 8%;">#</th>
+                                            <th scope="col" style="width: 30%;">Teacher Name</th>
+                                            <th scope="col" style="width: 27%;">Email</th>
+                                            <th scope="col" style="width: 35%;">Qualified Subjects</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {% for teacher in teachers %}
+                                            <tr>
+                                                <td class="ps-4 text-muted">{{ loop.index }}</td>
+                                                <td class="fw-medium text-dark">{{ teacher.name }}</td>
+                                                <td>
+                                                    {% if teacher.email %}
+                                                        <span class="text-secondary small font-monospace">{{ teacher.email }}</span>
+                                                    {% else %}
+                                                        <span class="text-muted small fst-italic">Not provided</span>
+                                                    {% endif %}
+                                                </td>
+                                                <td>
+                                                    {% if teacher.subjects %}
+                                                        <div class="d-flex flex-wrap gap-1">
+                                                            {% for sub in teacher.subjects %}
+                                                                <span
+                                                                    class="badge bg-primary-subtle text-primary border border-primary-subtle px-2 py-1"
+                                                                    title="{{ sub.name }}"
+                                                                >
+                                                                    {{ sub.code }}
+                                                                </span>
+                                                            {% endfor %}
+                                                        </div>
+                                                    {% else %}
+                                                        <span class="text-muted small fst-italic">No subjects assigned</span>
+                                                    {% endif %}
+                                                </td>
+                                            </tr>
+                                        {% endfor %}
+                                    </tbody>
+                                </table>
+                            </div>
+                        {% else %}
+                            <div class="text-center py-5 text-muted">
+                                <div class="display-6 mb-2">👨‍🏫</div>
+                                <h6 class="fw-bold">No teachers registered yet</h6>
+                                <p class="small mb-0">Use the form on the left to add your first faculty member.</p>
+                            </div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

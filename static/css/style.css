@@ -1,0 +1,30 @@
+/* Smart Routine Generator - Custom Styles */
+:root {
+    --primary-color: #0d6efd;
+    --border-color: #dee2e6;
+}
+
+body {
+    background-color: #f8f9fa;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+}
+
+main {
+    flex: 1;
+}
+
+.stat-card {
+    transition: transform 0.15s ease-in-out, box-shadow 0.15s ease-in-out;
+}
+
+.stat-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.08) !important;
+}
+
+.navbar-brand {
+    letter-spacing: -0.2px;
+}

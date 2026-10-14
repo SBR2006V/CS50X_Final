@@ -1,0 +1,103 @@
+{% extends "layout.html" %}
+
+{% block title %}Dashboard - Smart Routine Generator{% endblock %}
+
+{% block content %}
+<div class="row mb-4 align-items-center">
+    <div class="col-md-8">
+        <h1 class="h3 fw-bold mb-1">Academic Dashboard</h1>
+        <p class="text-secondary mb-0">Overview of departments, faculty, student sections, and timetable status.</p>
+    </div>
+    <div class="col-md-4 text-md-end mt-3 mt-md-0">
+        <span class="badge bg-success-subtle text-success border border-success-subtle px-3 py-2 rounded-pill">
+            ● Database Active (routine.db)
+        </span>
+    </div>
+</div>
+
+<!-- Overview Stats Cards -->
+<div class="row g-3 mb-4">
+    <div class="col-sm-6 col-lg-3">
+        <div class="card h-100 shadow-sm border-0 stat-card">
+            <div class="card-body">
+                <div class="text-muted small text-uppercase fw-semibold mb-1">Subjects</div>
+                <div class="display-6 fw-bold text-primary">{{ counts.subjects }}</div>
+                <div class="text-muted small mt-2">Curriculum course units</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-sm-6 col-lg-3">
+        <div class="card h-100 shadow-sm border-0 stat-card">
+            <div class="card-body">
+                <div class="text-muted small text-uppercase fw-semibold mb-1">Teachers</div>
+                <div class="display-6 fw-bold text-success">{{ counts.teachers }}</div>
+                <div class="text-muted small mt-2">Faculty members</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-sm-6 col-lg-3">
+        <div class="card h-100 shadow-sm border-0 stat-card">
+            <div class="card-body">
+                <div class="text-muted small text-uppercase fw-semibold mb-1">Sections</div>
+                <div class="display-6 fw-bold text-info">{{ counts.sections }}</div>
+                <div class="text-muted small mt-2">Student cohorts</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-sm-6 col-lg-3">
+        <div class="card h-100 shadow-sm border-0 stat-card">
+            <div class="card-body">
+                <div class="text-muted small text-uppercase fw-semibold mb-1">Scheduled Entries</div>
+                <div class="display-6 fw-bold text-warning">{{ counts.entries }}</div>
+                <div class="text-muted small mt-2">Weekly routine slots</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- System Info Card -->
+<div class="row g-3">
+    <div class="col-lg-8">
+        <div class="card shadow-sm border-0">
+            <div class="card-header bg-white py-3">
+                <h5 class="card-title mb-0 fw-semibold">College Timetable Rules (Version 1)</h5>
+            </div>
+            <div class="card-body">
+                <ul class="list-group list-group-flush">
+                    <li class="list-group-item px-0 d-flex justify-content-between align-items-center">
+                        <span><strong>Working Days:</strong> Monday through Friday</span>
+                        <span class="badge bg-secondary">5 Days / Week</span>
+                    </li>
+                    <li class="list-group-item px-0 d-flex justify-content-between align-items-center">
+                        <span><strong>Periods per Day:</strong> Periods 1 to 6</span>
+                        <span class="badge bg-secondary">30 Total Slots / Section</span>
+                    </li>
+                    <li class="list-group-item px-0 d-flex justify-content-between align-items-center">
+                        <span><strong>Clash Prevention:</strong> No section or teacher double-booked</span>
+                        <span class="badge bg-success">Enforced by Schema</span>
+                    </li>
+                    <li class="list-group-item px-0 d-flex justify-content-between align-items-center">
+                        <span><strong>Teacher Assignment:</strong> Automated matching based on qualifications</span>
+                        <span class="badge bg-primary">Automated</span>
+                    </li>
+                </ul>
+            </div>
+        </div>
+    </div>
+    <div class="col-lg-4">
+        <div class="card shadow-sm border-0 h-100">
+            <div class="card-header bg-white py-3">
+                <h5 class="card-title mb-0 fw-semibold">Quick Actions</h5>
+            </div>
+            <div class="card-body d-flex flex-column gap-2 justify-content-center">
+                <a href="{{ url_for('setup') }}" class="btn btn-outline-primary w-100 text-start py-2">
+                    ⚙ Manage Setup
+                </a>
+                <a href="{{ url_for('routine') }}" class="btn btn-outline-success w-100 text-start py-2">
+                    📅 View Routine
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
