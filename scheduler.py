@@ -33,17 +33,43 @@ TOTAL_WEEKLY_SLOTS: int = len(DAYS) * len(PERIODS)  # 5 * 6 = 30 slots
 class ScheduleResult:
     """
     Encapsulates the result of a timetable generation run.
+    Supports both object attribute access (.success, .entries, .error, .schedule)
+    and dict subscript access (['success'], ['entries'], ['error'], ['schedule']).
 
     Attributes:
         success (bool): True if a complete conflict-free schedule was generated; False otherwise.
         entries (list[dict]): The scheduled class entries if successful; empty list if failed.
+        schedule (list[dict]): Alias for entries.
         error (str or None): Descriptive error message if generation failed or prerequisites missing.
     """
 
     def __init__(self, success: bool, entries: Optional[List[dict]] = None, error: Optional[str] = None):
         self.success = bool(success)
         self.entries = entries if (success and entries is not None) else []
+        self.schedule = self.entries
         self.error = error
+
+    def __bool__(self) -> bool:
+        """Allows direct boolean check: if result: ..."""
+        return self.success
+
+    def __getitem__(self, item: str):
+        if item in ("entries", "schedule"):
+            return self.entries
+        if item == "success":
+            return self.success
+        if item == "error":
+            return self.error
+        raise KeyError(item)
+
+    def get(self, item: str, default=None):
+        try:
+            return self[item]
+        except KeyError:
+            return default
+
+    def __contains__(self, item: str) -> bool:
+        return item in ("success", "entries", "schedule", "error")
 
     def __repr__(self) -> str:
         return f"<ScheduleResult success={self.success} entries={len(self.entries)} error={self.error!r}>"
@@ -53,6 +79,7 @@ class ScheduleResult:
         return {
             "success": self.success,
             "entries": self.entries,
+            "schedule": self.entries,
             "error": self.error,
         }
 

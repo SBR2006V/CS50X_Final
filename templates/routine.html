@@ -3,23 +3,196 @@
 {% block title %}Routine - Smart Routine Generator{% endblock %}
 
 {% block content %}
-<div class="row justify-content-center">
-    <div class="col-lg-8">
-        <div class="card shadow-sm border-0 p-5 text-center my-4">
-            <div class="display-5 text-success mb-3">&#128197;</div>
-            <h2 class="h4 fw-bold">Timetable Routine</h2>
-            <p class="text-secondary max-w-500 mx-auto my-3">
-                This section will automatically generate weekly routines (Monday to Friday, Periods 1 to 6) without section or teacher clashes.
-            </p>
-            <div class="alert alert-success d-inline-block text-start mx-auto mb-4" role="alert">
-                <strong>Upcoming in Step 3:</strong> Automated constraint-satisfaction schedule generation and timetable grid views.
+<div class="row mb-4 align-items-center">
+    <div class="col-md-7">
+        <h1 class="h3 fw-bold mb-1">Weekly Timetable Routine</h1>
+        <p class="text-secondary mb-0">Monday through Friday, Periods 1 to 6 schedule with automated clash prevention.</p>
+    </div>
+    <div class="col-md-5 text-md-end mt-3 mt-md-0 d-flex gap-2 justify-content-md-end align-items-center">
+        {% if not sync_status.is_generated %}
+            <span class="badge bg-secondary-subtle text-secondary border px-3 py-2 rounded-pill">
+                ● No Routine Generated
+            </span>
+        {% elif sync_status.is_outdated or last_generation_error %}
+            <span class="badge bg-warning-subtle text-warning-emphasis border border-warning px-3 py-2 rounded-pill fw-semibold">
+                ⚠️ Outdated Timetable ({{ entries|length }} periods saved)
+            </span>
+        {% else %}
+            <span class="badge bg-success-subtle text-success border border-success-subtle px-3 py-2 rounded-pill">
+                ● Published &amp; Up to Date ({{ entries|length }} total periods)
+            </span>
+        {% endif %}
+
+        <form action="{{ url_for('generate_routine') }}" method="POST" class="d-inline">
+            <button type="submit" class="btn {% if sync_status.is_outdated or last_generation_error %}btn-warning text-dark{% else %}btn-primary{% endif %} fw-semibold shadow-sm">
+                <span class="me-1">&#9889;</span> {% if entries %}Regenerate Routine{% else %}Generate Routine{% endif %}
+            </button>
+        </form>
+    </div>
+</div>
+
+{% if sync_status.is_outdated or last_generation_error %}
+    <!-- Outdated / Generation Failed Alert Banner -->
+    <div class="alert alert-warning border-warning shadow-sm mb-4" role="alert">
+        <div class="d-flex align-items-center mb-1">
+            <span class="fs-5 me-2">⚠️</span>
+            <h5 class="alert-heading mb-0 fw-bold">Timetable Outdated &bull; Does Not Match Current Setup</h5>
+        </div>
+        <p class="mb-2">
+            The timetable shown below is from a previous generation (<strong>{{ entries|length }} period(s)</strong>) and does not reflect your current academic configuration (<strong>{{ sync_status.total_required }} period(s) required</strong>).
+        </p>
+        {% if last_generation_error %}
+            <div class="alert alert-danger py-2 px-3 mb-2 small">
+                <strong>Latest Generation Attempt Failed:</strong> {{ last_generation_error }}
             </div>
-            <div>
-                <a href="{{ url_for('index') }}" class="btn btn-outline-primary px-4">
-                    &larr; Back to Dashboard
-                </a>
+        {% endif %}
+        {% if sync_status.outdated_reasons %}
+            <ul class="mb-0 small ps-3">
+                {% for reason in sync_status.outdated_reasons %}
+                    <li>{{ reason }}</li>
+                {% endfor %}
+            </ul>
+        {% endif %}
+    </div>
+{% endif %}
+
+{% if entries and sections %}
+    <!-- Section Navigation Tabs -->
+    <ul class="nav nav-pills mb-4 gap-2" id="routineTabs" role="tablist">
+        {% for sec in sections %}
+            {% set sinfo = section_timetables[sec.id] %}
+            <li class="nav-item" role="presentation">
+                <button
+                    class="nav-link fw-semibold {% if loop.first %}active{% endif %}"
+                    id="routine-tab-{{ sec.id }}"
+                    data-bs-toggle="pill"
+                    data-bs-target="#routine-pane-{{ sec.id }}"
+                    type="button"
+                    role="tab"
+                    aria-controls="routine-pane-{{ sec.id }}"
+                    aria-selected="{% if loop.first %}true{% else %}false{% endif %}"
+                >
+                    👥 {{ sec.name }}
+                    {% if sinfo.is_outdated %}
+                        <span class="badge bg-warning text-dark ms-1" title="Outdated: {{ sinfo.total_classes }} scheduled vs {{ sinfo.required_classes }} required">
+                            {{ sinfo.total_classes }} / {{ sinfo.required_classes }} req
+                        </span>
+                    {% else %}
+                        <span class="badge bg-light text-secondary ms-1">
+                            {{ sinfo.total_classes }} / 30
+                        </span>
+                    {% endif %}
+                </button>
+            </li>
+        {% endfor %}
+    </ul>
+
+    <div class="tab-content" id="routineTabContent">
+        {% for sec in sections %}
+            {% set sinfo = section_timetables[sec.id] %}
+            <div
+                class="tab-pane fade {% if loop.first %}show active{% endif %}"
+                id="routine-pane-{{ sec.id }}"
+                role="tabpanel"
+                aria-labelledby="routine-tab-{{ sec.id }}"
+                tabindex="0"
+            >
+                <div class="card shadow-sm border-0 mb-4">
+                    <div class="card-header bg-white py-3 border-bottom d-flex justify-content-between align-items-center">
+                        <div>
+                            <h5 class="card-title mb-0 fw-semibold text-primary">
+                                Routine for Section: <span class="font-monospace text-dark">{{ sec.name }}</span>
+                            </h5>
+                            <span class="small text-muted">
+                                {{ sinfo.total_classes }} periods scheduled &bull; {{ 30 - sinfo.total_classes }} free periods
+                                {% if sinfo.is_outdated %}
+                                    &bull; <strong class="text-danger">Current requirement: {{ sinfo.required_classes }} periods</strong>
+                                {% endif %}
+                            </span>
+                        </div>
+                        <div>
+                            {% if sinfo.is_outdated %}
+                                <span class="badge bg-warning text-dark rounded-pill px-3 py-2 me-1">
+                                    ⚠️ Outdated ({{ sinfo.total_classes }}/{{ sinfo.required_classes }} req)
+                                </span>
+                            {% endif %}
+                            <span class="badge bg-primary rounded-pill px-3 py-2">
+                                Section {{ sec.name }}
+                            </span>
+                        </div>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="table-responsive">
+                            <table class="table table-bordered text-center align-middle mb-0">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th scope="col" style="width: 14%;" class="py-3">Day / Period</th>
+                                        {% for period in periods %}
+                                            <th scope="col" style="width: 14.33%;" class="py-3">
+                                                Period {{ period }}
+                                            </th>
+                                        {% endfor %}
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for day in days %}
+                                        <tr>
+                                            <th scope="row" class="table-light fw-bold text-dark py-3">
+                                                {{ day }}
+                                            </th>
+                                            {% for period in periods %}
+                                                {% set slot = sinfo['grid'][day][period] %}
+                                                {% if slot %}
+                                                    <td class="p-2 bg-white">
+                                                        <div class="p-2 rounded bg-light border border-primary-subtle shadow-sm h-100 d-flex flex-column justify-content-center">
+                                                            <div class="fw-bold text-primary font-monospace">{{ slot.subject_code }}</div>
+                                                            <div class="small text-truncate text-secondary mb-1" title="{{ slot.subject_name }}">
+                                                                {{ slot.subject_name }}
+                                                            </div>
+                                                            <div class="small fw-semibold text-dark">
+                                                                👨‍🏫 {{ slot.teacher_name }}
+                                                            </div>
+                                                        </div>
+                                                    </td>
+                                                {% else %}
+                                                    <td class="table-light p-2">
+                                                        <span class="small fst-italic text-muted opacity-75">&mdash; Free &mdash;</span>
+                                                    </td>
+                                                {% endif %}
+                                            {% endfor %}
+                                        </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        {% endfor %}
+    </div>
+
+{% else %}
+    <!-- Empty State: No Routine Generated Yet -->
+    <div class="row justify-content-center">
+        <div class="col-lg-8">
+            <div class="card shadow-sm border-0 p-5 text-center my-4">
+                <div class="display-4 text-primary mb-3">&#128197;</div>
+                <h2 class="h4 fw-bold">No Timetable Generated Yet</h2>
+                <p class="text-secondary max-w-500 mx-auto my-3">
+                    Configure curriculum subjects, faculty members, qualifications, and student section requirements in the Setup section, then click below to generate an automated clash-free timetable.
+                </p>
+                <div class="d-flex justify-content-center gap-3 mt-2">
+                    <form action="{{ url_for('generate_routine') }}" method="POST">
+                        <button type="submit" class="btn btn-primary px-4 py-2 fw-semibold">
+                            &#9889; Generate Timetable Now
+                        </button>
+                    </form>
+                    <a href="{{ url_for('setup') }}" class="btn btn-outline-secondary px-4 py-2">
+                        ⚙ Academic Setup
+                    </a>
+                </div>
             </div>
         </div>
     </div>
-</div>
+{% endif %}
 {% endblock %}

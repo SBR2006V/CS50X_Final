@@ -529,7 +529,7 @@
                                                         <div
                                                             class="progress-bar {% if sec.total_periods == 30 %}bg-success{% else %}bg-primary{% endif %}"
                                                             role="progressbar"
-                                                            style="width: {{ (sec.total_periods / 30 * 100)|round }}%;"
+                                                            {{ ('style="width: ' ~ ((sec.total_periods / 30 * 100)|round|int) ~ '%;"')|safe }}
                                                             aria-valuenow="{{ sec.total_periods }}"
                                                             aria-valuemin="0"
                                                             aria-valuemax="30"

@@ -1,11 +1,12 @@
 """
-Tests for Flask application routes, subject management, teacher management, qualifications, and section requirements (Step 2B, 2C & 2D).
+Tests for Flask application routes, subject management, teacher management, qualifications, section requirements, and routine generation (Step 2B, 2C, 2D & 3B).
 Uses Python's built-in unittest and Flask's test_client.
 """
 
 import gc
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from app import app
 from database import get_db_connection, init_db
@@ -820,6 +821,400 @@ class TestAppRoutesAndSubjects(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Sections", response.data)
         self.assertIn(b">2<", response.data)
+
+    # =========================================================================
+    # Step 3B Tests: Timetable Generation, Transactions, and Routine Views
+    # =========================================================================
+
+    def test_routine_page_loads_empty_state(self):
+        """GET /routine should return 200 OK and show empty state when no routine exists."""
+        response = self.client.get("/routine")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Weekly Timetable Routine", response.data)
+        self.assertIn(b"No Timetable Generated Yet", response.data)
+        self.assertIn(b"Generate Timetable Now", response.data)
+
+    def test_generate_routine_success(self):
+        """POST /routine/generate should successfully generate, commit, and display routine grid."""
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                sec_id = conn.execute("INSERT INTO sections (name) VALUES ('CSE-A');").lastrowid
+                s1_id = conn.execute("INSERT INTO subjects (code, name) VALUES ('CS101', 'Intro to CS');").lastrowid
+                s2_id = conn.execute("INSERT INTO subjects (code, name) VALUES ('MATH101', 'Calculus');").lastrowid
+                t1_id = conn.execute("INSERT INTO teachers (name, email) VALUES ('Dr. Ada Lovelace', 'ada@cs.edu');").lastrowid
+                t2_id = conn.execute("INSERT INTO teachers (name, email) VALUES ('Prof. Euler', 'euler@math.edu');").lastrowid
+
+                conn.execute("INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?);", (t1_id, s1_id))
+                conn.execute("INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?);", (t2_id, s2_id))
+
+                conn.execute("INSERT INTO section_requirements (section_id, subject_id, weekly_periods) VALUES (?, ?, 4);", (sec_id, s1_id))
+                conn.execute("INSERT INTO section_requirements (section_id, subject_id, weekly_periods) VALUES (?, ?, 3);", (sec_id, s2_id))
+        finally:
+            conn.close()
+
+        response = self.client.post("/routine/generate", follow_redirects=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Timetable successfully generated and published!", response.data)
+        self.assertIn(b"CS101", response.data)
+        self.assertIn(b"MATH101", response.data)
+        self.assertIn(b"Dr. Ada Lovelace", response.data)
+        self.assertIn(b"Prof. Euler", response.data)
+        self.assertIn(b"CSE-A", response.data)
+
+        # Direct database verification
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            count = conn.execute("SELECT COUNT(*) AS total FROM timetable_entries;").fetchone()["total"]
+            self.assertEqual(count, 7)  # 4 + 3 = 7
+        finally:
+            conn.close()
+
+    def test_generate_routine_teacher_and_section_clash_prevention(self):
+        """POST /routine/generate must prevent section and teacher clashes across sections."""
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                sec1_id = conn.execute("INSERT INTO sections (name) VALUES ('CSE-A');").lastrowid
+                sec2_id = conn.execute("INSERT INTO sections (name) VALUES ('CSE-B');").lastrowid
+                sub_id = conn.execute("INSERT INTO subjects (code, name) VALUES ('CS101', 'Intro to CS');").lastrowid
+                t_id = conn.execute("INSERT INTO teachers (name) VALUES ('Prof. Turing');").lastrowid
+
+                conn.execute("INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?);", (t_id, sub_id))
+
+                conn.execute("INSERT INTO section_requirements (section_id, subject_id, weekly_periods) VALUES (?, ?, 5);", (sec1_id, sub_id))
+                conn.execute("INSERT INTO section_requirements (section_id, subject_id, weekly_periods) VALUES (?, ?, 5);", (sec2_id, sub_id))
+        finally:
+            conn.close()
+
+        response = self.client.post("/routine/generate", follow_redirects=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Timetable successfully generated", response.data)
+
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            # 1. Total entries
+            total = conn.execute("SELECT COUNT(*) AS total FROM timetable_entries;").fetchone()["total"]
+            self.assertEqual(total, 10)
+
+            # 2. Section clash verification: no section has 2 classes in the same (day, period)
+            sec_clashes = conn.execute(
+                """
+                SELECT section_id, day_of_week, period, COUNT(*) AS cnt
+                FROM timetable_entries
+                GROUP BY section_id, day_of_week, period
+                HAVING cnt > 1;
+                """
+            ).fetchall()
+            self.assertEqual(len(sec_clashes), 0, "Section clash detected!")
+
+            # 3. Teacher clash verification: teacher never teaches 2 classes in the same (day, period)
+            teacher_clashes = conn.execute(
+                """
+                SELECT teacher_id, day_of_week, period, COUNT(*) AS cnt
+                FROM timetable_entries
+                GROUP BY teacher_id, day_of_week, period
+                HAVING cnt > 1;
+                """
+            ).fetchall()
+            self.assertEqual(len(teacher_clashes), 0, "Teacher clash detected!")
+        finally:
+            conn.close()
+
+    def test_generate_routine_failure_missing_qualifications(self):
+        """POST /routine/generate should fail and not save partial entries if a subject lacks a teacher."""
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                sec_id = conn.execute("INSERT INTO sections (name) VALUES ('CSE-A');").lastrowid
+                sub_id = conn.execute("INSERT INTO subjects (code, name) VALUES ('CS101', 'Intro to CS');").lastrowid
+                # No teacher qualified for CS101!
+                conn.execute("INSERT INTO section_requirements (section_id, subject_id, weekly_periods) VALUES (?, ?, 4);", (sec_id, sub_id))
+        finally:
+            conn.close()
+
+        response = self.client.post("/routine/generate", follow_redirects=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Timetable generation failed:", response.data)
+        self.assertIn(b"No qualified teacher available", response.data)
+
+        # Verify no entries were saved in timetable_entries
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            count = conn.execute("SELECT COUNT(*) AS total FROM timetable_entries;").fetchone()["total"]
+            self.assertEqual(count, 0)
+        finally:
+            conn.close()
+
+    def test_generate_routine_failure_overloaded_section(self):
+        """POST /routine/generate should fail and not save partial entries if section requirements are impossible."""
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                sec_id = conn.execute("INSERT INTO sections (name) VALUES ('CSE-A');").lastrowid
+                s1_id = conn.execute("INSERT INTO subjects (code, name) VALUES ('CS101', 'Intro to CS');").lastrowid
+                s2_id = conn.execute("INSERT INTO subjects (code, name) VALUES ('MATH101', 'Calculus');").lastrowid
+                t_id = conn.execute("INSERT INTO teachers (name) VALUES ('Dr. Ada');").lastrowid
+                conn.execute("INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?);", (t_id, s1_id))
+                conn.execute("INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?);", (t_id, s2_id))
+                # 20 + 15 = 35 periods exceeds maximum 30
+                conn.execute("INSERT INTO section_requirements (section_id, subject_id, weekly_periods) VALUES (?, ?, 20);", (sec_id, s1_id))
+                conn.execute("INSERT INTO section_requirements (section_id, subject_id, weekly_periods) VALUES (?, ?, 15);", (sec_id, s2_id))
+        finally:
+            conn.close()
+
+        response = self.client.post("/routine/generate", follow_redirects=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Timetable generation failed:", response.data)
+
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            count = conn.execute("SELECT COUNT(*) AS total FROM timetable_entries;").fetchone()["total"]
+            self.assertEqual(count, 0)
+        finally:
+            conn.close()
+
+    def test_generate_routine_replaces_old_entries_atomically(self):
+        """POST /routine/generate should replace previous timetable without duplicating entries."""
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                sec_id = conn.execute("INSERT INTO sections (name) VALUES ('CSE-A');").lastrowid
+                sub_id = conn.execute("INSERT INTO subjects (code, name) VALUES ('CS101', 'Intro to CS');").lastrowid
+                t_id = conn.execute("INSERT INTO teachers (name) VALUES ('Dr. Ada');").lastrowid
+                conn.execute("INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?);", (t_id, sub_id))
+                conn.execute("INSERT INTO section_requirements (section_id, subject_id, weekly_periods) VALUES (?, ?, 4);", (sec_id, sub_id))
+        finally:
+            conn.close()
+
+        # Run 1: generate 4 periods
+        res1 = self.client.post("/routine/generate", follow_redirects=True)
+        self.assertEqual(res1.status_code, 200)
+
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            count1 = conn.execute("SELECT COUNT(*) AS total FROM timetable_entries;").fetchone()["total"]
+            self.assertEqual(count1, 4)
+        finally:
+            conn.close()
+
+        # Update requirement to 6 periods
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                conn.execute("UPDATE section_requirements SET weekly_periods = 6 WHERE section_id = ?;", (sec_id,))
+        finally:
+            conn.close()
+
+        # Run 2: regenerate
+        res2 = self.client.post("/routine/generate", follow_redirects=True)
+        self.assertEqual(res2.status_code, 200)
+
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            count2 = conn.execute("SELECT COUNT(*) AS total FROM timetable_entries;").fetchone()["total"]
+            self.assertEqual(count2, 6)  # Exactly 6, not 4 + 6 = 10!
+        finally:
+            conn.close()
+
+    def test_generate_routine_transaction_rollback_on_db_error(self):
+        """If a database error occurs during insertion, the transaction rolls back cleanly without losing old timetable."""
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                sec_id = conn.execute("INSERT INTO sections (name) VALUES ('CSE-A');").lastrowid
+                sub_id = conn.execute("INSERT INTO subjects (code, name) VALUES ('CS101', 'Intro to CS');").lastrowid
+                t_id = conn.execute("INSERT INTO teachers (name) VALUES ('Dr. Ada');").lastrowid
+                conn.execute("INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?);", (t_id, sub_id))
+                conn.execute("INSERT INTO section_requirements (section_id, subject_id, weekly_periods) VALUES (?, ?, 4);", (sec_id, sub_id))
+                # Insert initial timetable entry
+                conn.execute(
+                    """
+                    INSERT INTO timetable_entries (section_id, teacher_id, subject_id, day_of_week, period)
+                    VALUES (?, ?, ?, 'Monday', 1);
+                    """,
+                    (sec_id, t_id, sub_id),
+                )
+        finally:
+            conn.close()
+
+        # Simulate a database constraint failure by mocking generate_schedule with an invalid entry
+        from scheduler import ScheduleResult
+        malformed_result = ScheduleResult(
+            success=True,
+            entries=[
+                # Invalid foreign key IDs (99999) and invalid day 'InvalidDay' will trigger SQLite constraint violation
+                {"section_id": 99999, "teacher_id": 99999, "subject_id": 99999, "day_of_week": "InvalidDay", "period": 99}
+            ]
+        )
+
+        with patch("app.generate_schedule", return_value=malformed_result):
+            response = self.client.post("/routine/generate", follow_redirects=True)
+            self.assertEqual(response.status_code, 200)
+            self.assertIn(b"Database error while saving timetable:", response.data)
+
+        # Verify transaction rollback preserved the previous timetable entry
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            count = conn.execute("SELECT COUNT(*) AS total FROM timetable_entries;").fetchone()["total"]
+            self.assertEqual(count, 1)  # Preserved!
+        finally:
+            conn.close()
+
+    def test_dashboard_entries_count_reflects_routine(self):
+        """GET / should dynamically show the number of scheduled routine entries."""
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                sec_id = conn.execute("INSERT INTO sections (name) VALUES ('CSE-A');").lastrowid
+                sub_id = conn.execute("INSERT INTO subjects (code, name) VALUES ('CS101', 'Intro to CS');").lastrowid
+                t_id = conn.execute("INSERT INTO teachers (name) VALUES ('Dr. Ada');").lastrowid
+                conn.execute("INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?);", (t_id, sub_id))
+                conn.execute("INSERT INTO section_requirements (section_id, subject_id, weekly_periods) VALUES (?, ?, 5);", (sec_id, sub_id))
+        finally:
+            conn.close()
+
+        self.client.post("/routine/generate", follow_redirects=True)
+
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Scheduled Entries", response.data)
+        self.assertIn(b">5<", response.data)
+
+    def test_unqualified_subject_regeneration_fails_and_preserves_old_entries(self):
+        """
+        Regression test:
+        When a requirement has no qualified teacher:
+        1. Generation must fail with subject- and section-specific error.
+        2. No partial entries are inserted.
+        3. Previously saved timetable entries remain unchanged (safety behavior).
+        4. The UI clearly communicates that the existing timetable is outdated / generation failed.
+        5. The UI does not label the old timetable as 'Published & Up to Date'.
+        6. The dashboard count continues to reflect stored entries.
+        7. When a qualified teacher is provided, regeneration succeeds and replaces the timetable atomically.
+        """
+        # Step 1: Initial valid setup (CSE-A has 4 periods of CS101, taught by Dr. Ada)
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                sec_id = conn.execute("INSERT INTO sections (name) VALUES ('CSE-A');").lastrowid
+                cs_id = conn.execute("INSERT INTO subjects (code, name) VALUES ('CS101', 'Intro to CS');").lastrowid
+                t_ada = conn.execute("INSERT INTO teachers (name, email) VALUES ('Dr. Ada', 'ada@cs.edu');").lastrowid
+                conn.execute("INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?);", (t_ada, cs_id))
+                conn.execute("INSERT INTO section_requirements (section_id, subject_id, weekly_periods) VALUES (?, ?, 4);", (sec_id, cs_id))
+        finally:
+            conn.close()
+
+        # Generate initial timetable
+        res_initial = self.client.post("/routine/generate", follow_redirects=True)
+        self.assertEqual(res_initial.status_code, 200)
+        self.assertIn(b"Timetable successfully generated and published!", res_initial.data)
+        self.assertIn(b"Published &amp; Up to Date", res_initial.data)
+
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            initial_count = conn.execute("SELECT COUNT(*) AS total FROM timetable_entries;").fetchone()["total"]
+            self.assertEqual(initial_count, 4)
+        finally:
+            conn.close()
+
+        # Step 2: Add a new subject requirement with NO qualified teacher assigned
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                phy_id = conn.execute("INSERT INTO subjects (code, name) VALUES ('PHY101', 'Physics');").lastrowid
+                # No teacher added to teacher_subjects for PHY101!
+                conn.execute("INSERT INTO section_requirements (section_id, subject_id, weekly_periods) VALUES (?, ?, 2);", (sec_id, phy_id))
+        finally:
+            conn.close()
+
+        # Step 3: User clicks 'Regenerate Routine'
+        res_regen = self.client.post("/routine/generate", follow_redirects=True)
+        self.assertEqual(res_regen.status_code, 200)
+
+        # Requirement 1: Generation fails with clear subject- and section-specific error
+        self.assertIn(b"Timetable generation failed:", res_regen.data)
+        self.assertIn(b"PHY101", res_regen.data)
+        self.assertIn(b"CSE-A", res_regen.data)
+        self.assertIn(b"No qualified teacher available for subject", res_regen.data)
+
+        # Requirement 2 & 3: No partial entries saved, previous 4 entries completely preserved
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            count_after_fail = conn.execute("SELECT COUNT(*) AS total FROM timetable_entries;").fetchone()["total"]
+            self.assertEqual(count_after_fail, 4, "Previous entries were deleted or partial entries were inserted!")
+
+            # Verify no PHY101 entries exist
+            phy_entries = conn.execute("SELECT COUNT(*) AS total FROM timetable_entries WHERE subject_id = ?;", (phy_id,)).fetchone()["total"]
+            self.assertEqual(phy_entries, 0, "Partial PHY101 entries were erroneously inserted!")
+        finally:
+            conn.close()
+
+        # Requirement 4: UI clearly communicates the timetable is outdated and that latest generation failed
+        self.assertIn(b"Outdated Timetable", res_regen.data)
+        self.assertIn(b"Timetable Outdated", res_regen.data)
+        self.assertIn(b"Latest Generation Attempt Failed:", res_regen.data)
+        self.assertNotIn(b"Published &amp; Up to Date", res_regen.data)
+
+        # Requirement 6: Dashboard count continues to reflect exactly the 4 stored entries
+        res_dash = self.client.get("/")
+        self.assertEqual(res_dash.status_code, 200)
+        self.assertIn(b">4<", res_dash.data)
+
+        # Step 4: Now add a qualified teacher for PHY101
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                t_newton = conn.execute("INSERT INTO teachers (name, email) VALUES ('Dr. Newton', 'newton@sci.edu');").lastrowid
+                conn.execute("INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?);", (t_newton, phy_id))
+        finally:
+            conn.close()
+
+        # Step 5: Regenerate routine with valid configuration
+        res_success = self.client.post("/routine/generate", follow_redirects=True)
+        self.assertEqual(res_success.status_code, 200)
+        self.assertIn(b"Timetable successfully generated and published!", res_success.data)
+        self.assertIn(b"Published &amp; Up to Date", res_success.data)
+        self.assertIn(b"6 total periods", res_success.data)
+
+        # Total entries updated to 6 (4 + 2)
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            final_count = conn.execute("SELECT COUNT(*) AS total FROM timetable_entries;").fetchone()["total"]
+            self.assertEqual(final_count, 6)
+        finally:
+            conn.close()
+
+    def test_ui_communicates_outdated_routine_when_requirements_change_without_regeneration(self):
+        """GET /routine should show outdated warning if setup was changed after timetable was generated."""
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                sec_id = conn.execute("INSERT INTO sections (name) VALUES ('CSE-A');").lastrowid
+                cs_id = conn.execute("INSERT INTO subjects (code, name) VALUES ('CS101', 'Intro to CS');").lastrowid
+                t_ada = conn.execute("INSERT INTO teachers (name, email) VALUES ('Dr. Ada', 'ada@cs.edu');").lastrowid
+                conn.execute("INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?);", (t_ada, cs_id))
+                conn.execute("INSERT INTO section_requirements (section_id, subject_id, weekly_periods) VALUES (?, ?, 4);", (sec_id, cs_id))
+        finally:
+            conn.close()
+
+        # Generate routine -> initially up to date
+        self.client.post("/routine/generate", follow_redirects=True)
+
+        # Modify requirements directly in setup (e.g. change CS101 from 4 to 6 periods)
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                conn.execute("UPDATE section_requirements SET weekly_periods = 6 WHERE section_id = ?;", (sec_id,))
+        finally:
+            conn.close()
+
+        # Visit GET /routine
+        res = self.client.get("/routine")
+        self.assertEqual(res.status_code, 200)
+        self.assertIn(b"Outdated Timetable", res.data)
+        self.assertIn(b"Requirements mismatch", res.data)
+        self.assertNotIn(b"Published &amp; Up to Date", res.data)
 
 
 if __name__ == "__main__":

@@ -2,14 +2,17 @@
 Smart Routine Generator - Flask Application
 CS50x Final Project
 
-Step 2D: Section management and weekly subject requirements.
+Step 3B: Automated timetable generation, transaction rollback, and routine display.
 """
 
 import os
 import sqlite3
-from flask import Flask, flash, g, redirect, render_template, request, url_for
+from typing import Any
+
+from flask import Flask, flash, g, redirect, render_template, request, session, url_for
 
 from database import DATABASE_PATH, get_db_connection
+from scheduler import DAYS, PERIODS, generate_schedule
 
 app = Flask(__name__)
 # Secret key for session management and flash messages
@@ -462,12 +465,241 @@ def add_requirement():
     return redirect(url_for("setup", tab="sections"))
 
 
-@app.route("/routine")
+def get_timetable_sync_status(db):
+    """
+    Check whether the saved timetable in timetable_entries matches
+    the current section_requirements and teacher qualifications.
+
+    Returns a dict with:
+        is_generated (bool): True if at least 1 entry is in timetable_entries.
+        total_entries (int): Count of scheduled timetable entries.
+        total_required (int): Cumulative periods required across all sections.
+        is_outdated (bool): True if the saved timetable is out of sync with current setup.
+        outdated_reasons (list[str]): Explanations for why the routine is outdated.
+        section_status (dict): Maps section_id -> {'required': int, 'scheduled': int, 'is_outdated': bool}
+    """
+    total_entries = db.execute("SELECT COUNT(*) AS count FROM timetable_entries;").fetchone()["count"]
+    total_required = db.execute("SELECT COALESCE(SUM(weekly_periods), 0) AS total FROM section_requirements;").fetchone()["total"]
+
+    if total_entries == 0:
+        return {
+            "is_generated": False,
+            "total_entries": 0,
+            "total_required": total_required,
+            "is_outdated": False,
+            "outdated_reasons": [],
+            "section_status": {},
+        }
+
+    # Section-level and requirement-level comparisons
+    req_rows = db.execute(
+        "SELECT section_id, subject_id, weekly_periods FROM section_requirements;"
+    ).fetchall()
+    req_map = {(r["section_id"], r["subject_id"]): r["weekly_periods"] for r in req_rows}
+
+    sched_rows = db.execute(
+        "SELECT section_id, subject_id, COUNT(*) AS cnt FROM timetable_entries GROUP BY section_id, subject_id;"
+    ).fetchall()
+    sched_map = {(r["section_id"], r["subject_id"]): r["cnt"] for r in sched_rows}
+
+    # Check for subjects required but lacking qualified teachers
+    unqualified_rows = db.execute(
+        """
+        SELECT sec.name AS section_name, sub.code AS subject_code
+        FROM section_requirements sr
+        JOIN sections sec ON sr.section_id = sec.id
+        JOIN subjects sub ON sr.subject_id = sub.id
+        WHERE sr.subject_id NOT IN (SELECT DISTINCT subject_id FROM teacher_subjects);
+        """
+    ).fetchall()
+
+    # Check for scheduled entries whose teachers are no longer qualified
+    invalid_teachers = db.execute(
+        """
+        SELECT te.id
+        FROM timetable_entries te
+        LEFT JOIN teacher_subjects ts ON te.teacher_id = ts.teacher_id AND te.subject_id = ts.subject_id
+        WHERE ts.teacher_id IS NULL;
+        """
+    ).fetchall()
+
+    outdated_reasons = []
+    is_outdated = False
+
+    if req_map != sched_map:
+        is_outdated = True
+        outdated_reasons.append(
+            f"Requirements mismatch: {total_entries} period(s) currently scheduled, but {total_required} period(s) are required by the academic setup."
+        )
+
+    if unqualified_rows:
+        is_outdated = True
+        for u in unqualified_rows:
+            outdated_reasons.append(
+                f"Subject '{u['subject_code']}' required by Section '{u['section_name']}' has no qualified teacher assigned."
+            )
+
+    if invalid_teachers:
+        is_outdated = True
+        outdated_reasons.append(
+            f"{len(invalid_teachers)} scheduled period(s) have teachers who are no longer qualified for the subject."
+        )
+
+    # Per-section summary
+    section_status = {}
+    sections = db.execute("SELECT id FROM sections;").fetchall()
+    for sec in sections:
+        sec_id = sec["id"]
+        sec_req = sum(r["weekly_periods"] for r in req_rows if r["section_id"] == sec_id)
+        sec_sched = sum(r["cnt"] for r in sched_rows if r["section_id"] == sec_id)
+        section_status[sec_id] = {
+            "required": sec_req,
+            "scheduled": sec_sched,
+            "is_outdated": (sec_req != sec_sched),
+        }
+
+    return {
+        "is_generated": True,
+        "total_entries": total_entries,
+        "total_required": total_required,
+        "is_outdated": is_outdated,
+        "outdated_reasons": outdated_reasons,
+        "section_status": section_status,
+    }
+
+
+@app.route("/routine", methods=["GET"])
 def routine():
     """
-    Placeholder route for Routine Generation and timetable viewing.
+    Timetable Routine route (GET /routine).
+    Retrieves all sections and the published timetable entries from the database,
+    structures the entries into day-by-period grids for each section,
+    determines if the timetable is outdated compared to the current configuration,
+    and displays the routine screen.
     """
-    return render_template("routine.html")
+    db = get_db()
+
+    # Retrieve all sections ordered by name
+    sections = db.execute("SELECT id, name FROM sections ORDER BY name ASC;").fetchall()
+
+    # Retrieve all timetable entries joined with section, teacher, and subject details
+    entries = db.execute(
+        """
+        SELECT te.id, te.section_id, te.teacher_id, te.subject_id, te.day_of_week, te.period,
+               sec.name AS section_name, t.name AS teacher_name,
+               sub.code AS subject_code, sub.name AS subject_name
+        FROM timetable_entries te
+        JOIN sections sec ON te.section_id = sec.id
+        JOIN teachers t ON te.teacher_id = t.id
+        JOIN subjects sub ON te.subject_id = sub.id
+        ORDER BY sec.name ASC, te.day_of_week ASC, te.period ASC;
+        """
+    ).fetchall()
+
+    sync_status = get_timetable_sync_status(db)
+    last_generation_error = session.get("last_generation_error")
+
+    # Build a lookup grid per section: section_id -> {day -> {period -> slot_info}}
+    section_timetables: dict[int, Any] = {}
+    for sec in sections:
+        sec_id = sec["id"]
+        sec_info = sync_status["section_status"].get(sec_id, {"required": 0, "scheduled": 0, "is_outdated": False})
+        section_timetables[sec_id] = {
+            "section": sec,
+            "grid": {day: {period: None for period in PERIODS} for day in DAYS},
+            "total_classes": 0,
+            "required_classes": sec_info["required"],
+            "is_outdated": sec_info["is_outdated"],
+        }
+
+    for row in entries:
+        sec_id = row["section_id"]
+        day = row["day_of_week"]
+        period = row["period"]
+        if sec_id in section_timetables and day in section_timetables[sec_id]["grid"]:
+            section_timetables[sec_id]["grid"][day][period] = {
+                "subject_code": row["subject_code"],
+                "subject_name": row["subject_name"],
+                "teacher_name": row["teacher_name"],
+            }
+            section_timetables[sec_id]["total_classes"] += 1
+
+    return render_template(
+        "routine.html",
+        sections=sections,
+        entries=entries,
+        section_timetables=section_timetables,
+        days=DAYS,
+        periods=PERIODS,
+        sync_status=sync_status,
+        last_generation_error=last_generation_error,
+    )
+
+
+@app.route("/routine/generate", methods=["POST"])
+@app.route("/generate-routine", methods=["POST"])
+def generate_routine():
+    """
+    POST route to generate and publish an automated timetable.
+    1. Loads the database configuration and invokes generate_schedule().
+    2. If scheduling fails, stores the error in session, flashes error, and halts (saving no partial entries).
+    3. If scheduling succeeds, atomically replaces the existing timetable_entries
+       inside a database transaction. If any error occurs, rolls back cleanly.
+    """
+    db = get_db()
+
+    # 1. Generate schedule using scheduler module
+    result = generate_schedule(conn=db)
+
+    # Support both ScheduleResult object and dictionary formats safely
+    is_success = result.get("success") if isinstance(result, dict) else getattr(result, "success", False)
+    error_msg = result.get("error") if isinstance(result, dict) else getattr(result, "error", "Unknown error")
+    schedule_entries = (
+        (result.get("entries") or result.get("schedule"))
+        if isinstance(result, dict)
+        else (getattr(result, "entries", None) or getattr(result, "schedule", []))
+    )
+
+    if not is_success:
+        session["last_generation_error"] = error_msg
+        flash(f"Timetable generation failed: {error_msg}", "danger")
+        return redirect(url_for("routine"))
+
+    # 2. Save the complete schedule atomically inside a database transaction
+    try:
+        with db:
+            # Clear previous entries to prevent duplication
+            db.execute("DELETE FROM timetable_entries;")
+
+            # Insert all newly scheduled entries
+            for entry in schedule_entries:
+                db.execute(
+                    """
+                    INSERT INTO timetable_entries (section_id, teacher_id, subject_id, day_of_week, period)
+                    VALUES (?, ?, ?, ?, ?);
+                    """,
+                    (
+                        entry["section_id"],
+                        entry["teacher_id"],
+                        entry["subject_id"],
+                        entry["day_of_week"],
+                        entry["period"],
+                    ),
+                )
+
+        # Clear any prior generation error upon success
+        session.pop("last_generation_error", None)
+
+        flash(
+            f"Timetable successfully generated and published! ({len(schedule_entries)} total class periods scheduled).",
+            "success",
+        )
+    except Exception as e:
+        db.rollback()
+        session["last_generation_error"] = str(e)
+        flash(f"Database error while saving timetable: {str(e)}", "danger")
+
+    return redirect(url_for("routine"))
 
 
 if __name__ == "__main__":

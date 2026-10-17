@@ -418,6 +418,26 @@ class TestSchedulerAlgorithm(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_schedule_result_interface_compatibility(self):
+        """Verify ScheduleResult supports both attribute access (.success) and dict subscripting (['success'])."""
+        res_success = ScheduleResult(success=True, entries=[{"section_id": 1}], error=None)
+        self.assertTrue(res_success)
+        self.assertTrue(res_success.success)
+        self.assertTrue(res_success["success"])
+        self.assertEqual(res_success["entries"], [{"section_id": 1}])
+        self.assertEqual(res_success["schedule"], [{"section_id": 1}])
+        self.assertEqual(res_success.schedule, [{"section_id": 1}])
+        self.assertIsNone(res_success.get("error"))
+
+        res_fail = ScheduleResult(success=False, error="Teacher not qualified")
+        self.assertFalse(res_fail)
+        self.assertFalse(res_fail.success)
+        self.assertFalse(res_fail["success"])
+        self.assertEqual(res_fail["error"], "Teacher not qualified")
+        self.assertEqual(res_fail.get("error"), "Teacher not qualified")
+        self.assertEqual(res_fail["entries"], [])
+        self.assertEqual(res_fail["schedule"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
