@@ -5,6 +5,7 @@ Uses Python's built-in unittest and Flask's test_client.
 
 import gc
 from pathlib import Path
+import re
 import unittest
 from unittest.mock import patch
 
@@ -57,6 +58,117 @@ class TestAppRoutesAndSubjects(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Academic Dashboard", response.data)
         self.assertIn(b"Subjects", response.data)
+
+    def test_dashboard_cards_have_clickable_navigation_links(self):
+        """
+        Dashboard summary cards for Subjects, Teachers, and Sections should be clickable links
+        navigating to the setup route with the corresponding tab selected.
+        """
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        html = response.data.decode("utf-8")
+
+        # Verify Subjects card link, ID, and accessible label
+        self.assertIn('href="/setup?tab=subjects"', html)
+        self.assertIn('id="card-subjects"', html)
+        self.assertIn('aria-label="Subjects:', html)
+
+        # Verify Teachers card link, ID, and accessible label
+        self.assertIn('href="/setup?tab=teachers"', html)
+        self.assertIn('id="card-teachers"', html)
+        self.assertIn('aria-label="Teachers:', html)
+
+        # Verify Sections card link, ID, and accessible label
+        self.assertIn('href="/setup?tab=sections"', html)
+        self.assertIn('id="card-sections"', html)
+        self.assertIn('aria-label="Sections:', html)
+
+        # Verify cards maintain accessibility classes
+        self.assertIn("stat-card-link", html)
+        self.assertIn("text-decoration-none", html)
+
+    def test_setup_tab_query_parameter_selection(self):
+        """
+        GET /setup with ?tab= parameter should activate the requested tab button and pane.
+        Invalid or absent parameters should fall back to the default 'subjects' tab.
+        """
+        # 1. Subjects tab explicitly selected
+        res_sub = self.client.get("/setup?tab=subjects")
+        self.assertEqual(res_sub.status_code, 200)
+        html_sub = res_sub.data.decode("utf-8")
+        self.assertTrue(re.search(r'class="nav-link fw-semibold active"\s+id="subjects-tab"', html_sub))
+        self.assertFalse(re.search(r'class="nav-link fw-semibold active"\s+id="teachers-tab"', html_sub))
+        self.assertFalse(re.search(r'class="nav-link fw-semibold active"\s+id="sections-tab"', html_sub))
+        self.assertTrue(re.search(r'class="tab-pane fade show active"\s+id="subjects-pane"', html_sub))
+        self.assertFalse(re.search(r'class="tab-pane fade show active"\s+id="teachers-pane"', html_sub))
+        self.assertFalse(re.search(r'class="tab-pane fade show active"\s+id="sections-pane"', html_sub))
+
+        # 2. Teachers tab selected
+        res_teach = self.client.get("/setup?tab=teachers")
+        self.assertEqual(res_teach.status_code, 200)
+        html_teach = res_teach.data.decode("utf-8")
+        self.assertTrue(re.search(r'class="nav-link fw-semibold active"\s+id="teachers-tab"', html_teach))
+        self.assertFalse(re.search(r'class="nav-link fw-semibold active"\s+id="subjects-tab"', html_teach))
+        self.assertFalse(re.search(r'class="nav-link fw-semibold active"\s+id="sections-tab"', html_teach))
+        self.assertTrue(re.search(r'class="tab-pane fade show active"\s+id="teachers-pane"', html_teach))
+        self.assertFalse(re.search(r'class="tab-pane fade show active"\s+id="subjects-pane"', html_teach))
+        self.assertFalse(re.search(r'class="tab-pane fade show active"\s+id="sections-pane"', html_teach))
+
+        # 3. Sections tab selected
+        res_sec = self.client.get("/setup?tab=sections")
+        self.assertEqual(res_sec.status_code, 200)
+        html_sec = res_sec.data.decode("utf-8")
+        self.assertTrue(re.search(r'class="nav-link fw-semibold active"\s+id="sections-tab"', html_sec))
+        self.assertFalse(re.search(r'class="nav-link fw-semibold active"\s+id="subjects-tab"', html_sec))
+        self.assertFalse(re.search(r'class="nav-link fw-semibold active"\s+id="teachers-tab"', html_sec))
+        self.assertTrue(re.search(r'class="tab-pane fade show active"\s+id="sections-pane"', html_sec))
+        self.assertFalse(re.search(r'class="tab-pane fade show active"\s+id="subjects-pane"', html_sec))
+        self.assertFalse(re.search(r'class="tab-pane fade show active"\s+id="teachers-pane"', html_sec))
+
+        # 4. Default /setup without parameter falls back to subjects
+        res_default = self.client.get("/setup")
+        self.assertEqual(res_default.status_code, 200)
+        html_default = res_default.data.decode("utf-8")
+        self.assertTrue(re.search(r'class="nav-link fw-semibold active"\s+id="subjects-tab"', html_default))
+        self.assertTrue(re.search(r'class="tab-pane fade show active"\s+id="subjects-pane"', html_default))
+
+        # 5. Invalid query parameter safely defaults to subjects
+        res_invalid = self.client.get("/setup?tab=invalid_tab_name")
+        self.assertEqual(res_invalid.status_code, 200)
+        html_invalid = res_invalid.data.decode("utf-8")
+        self.assertTrue(re.search(r'class="nav-link fw-semibold active"\s+id="subjects-tab"', html_invalid))
+        self.assertTrue(re.search(r'class="tab-pane fade show active"\s+id="subjects-pane"', html_invalid))
+
+    def test_setup_tab_selection_persists_on_page_refresh(self):
+        """
+        Simulate a user navigating to a specific tab and refreshing the page:
+        the server should continuously serve the requested tab as active.
+        """
+        # Navigate to Teachers tab
+        res1 = self.client.get("/setup?tab=teachers")
+        self.assertEqual(res1.status_code, 200)
+        html1_first = res1.data.decode("utf-8")
+        self.assertTrue(re.search(r'class="tab-pane fade show active"\s+id="teachers-pane"', html1_first))
+
+        # Refresh page (repeat request to the same URL)
+        res1_refresh = self.client.get("/setup?tab=teachers")
+        self.assertEqual(res1_refresh.status_code, 200)
+        html1_refreshed = res1_refresh.data.decode("utf-8")
+        self.assertTrue(re.search(r'class="tab-pane fade show active"\s+id="teachers-pane"', html1_refreshed))
+        self.assertFalse(re.search(r'class="tab-pane fade show active"\s+id="subjects-pane"', html1_refreshed))
+
+        # Navigate to Sections tab
+        res2 = self.client.get("/setup?tab=sections")
+        self.assertEqual(res2.status_code, 200)
+        html2_first = res2.data.decode("utf-8")
+        self.assertTrue(re.search(r'class="tab-pane fade show active"\s+id="sections-pane"', html2_first))
+
+        # Refresh page
+        res2_refresh = self.client.get("/setup?tab=sections")
+        self.assertEqual(res2_refresh.status_code, 200)
+        html2_refreshed = res2_refresh.data.decode("utf-8")
+        self.assertTrue(re.search(r'class="tab-pane fade show active"\s+id="sections-pane"', html2_refreshed))
+        self.assertFalse(re.search(r'class="tab-pane fade show active"\s+id="subjects-pane"', html2_refreshed))
 
     def test_setup_page_loads_and_displays_form_and_table(self):
         """GET /setup should return 200 OK with the subject creation form and table."""
@@ -147,6 +259,273 @@ class TestAppRoutesAndSubjects(unittest.TestCase):
             self.assertEqual(rows[0]["name"], "General Physics I")
         finally:
             conn.close()
+
+    def test_setup_subjects_table_displays_edit_and_delete_actions_and_modals(self):
+        """GET /setup should display Edit and Delete action buttons and modals for each registered subject."""
+        self.client.post("/subjects", data={"code": "CS101", "name": "Intro to CS"}, follow_redirects=True)
+
+        response = self.client.get("/setup")
+        self.assertEqual(response.status_code, 200)
+        html = response.data.decode("utf-8")
+
+        self.assertIn("Actions", html)
+        self.assertIn("Edit", html)
+        self.assertIn("Delete", html)
+        self.assertIn("editSubjectModal", html)
+        self.assertIn("deleteSubjectModal", html)
+        self.assertIn("/edit", html)
+        self.assertIn("/delete", html)
+
+    def test_edit_subject_success(self):
+        """POST /subjects/<id>/edit should update subject code (uppercased) and name in DB, and flash success."""
+        # 1. Add initial subject
+        self.client.post("/subjects", data={"code": "CS101", "name": "Intro to CS"}, follow_redirects=True)
+        conn = get_db_connection(TEST_DB_PATH)
+        sub_id = conn.execute("SELECT id FROM subjects WHERE code = 'CS101';").fetchone()["id"]
+        conn.close()
+
+        # 2. Edit subject code and name
+        res = self.client.post(
+            f"/subjects/{sub_id}/edit",
+            data={"code": "cs102", "name": "Data Structures"},
+            follow_redirects=True,
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertIn(b"updated successfully", res.data)
+        self.assertIn(b"CS102", res.data)
+        self.assertIn(b"Data Structures", res.data)
+
+        # 3. Verify in database directly
+        conn = get_db_connection(TEST_DB_PATH)
+        row = conn.execute("SELECT code, name FROM subjects WHERE id = ?;", (sub_id,)).fetchone()
+        conn.close()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["code"], "CS102")
+        self.assertEqual(row["name"], "Data Structures")
+
+        # 4. Verify dashboard count remains 1
+        res_dash = self.client.get("/")
+        self.assertEqual(res_dash.status_code, 200)
+        self.assertIn(b">1<", res_dash.data)
+
+    def test_edit_subject_name_only_preserves_code(self):
+        """POST /subjects/<id>/edit keeping the existing code should succeed without self-collision error."""
+        self.client.post("/subjects", data={"code": "MATH101", "name": "Calculus I"}, follow_redirects=True)
+        conn = get_db_connection(TEST_DB_PATH)
+        sub_id = conn.execute("SELECT id FROM subjects WHERE code = 'MATH101';").fetchone()["id"]
+        conn.close()
+
+        res = self.client.post(
+            f"/subjects/{sub_id}/edit",
+            data={"code": "MATH101", "name": "Calculus and Analytic Geometry"},
+            follow_redirects=True,
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertIn(b"updated successfully", res.data)
+
+        conn = get_db_connection(TEST_DB_PATH)
+        row = conn.execute("SELECT code, name FROM subjects WHERE id = ?;", (sub_id,)).fetchone()
+        conn.close()
+        self.assertEqual(row["code"], "MATH101")
+        self.assertEqual(row["name"], "Calculus and Analytic Geometry")
+
+    def test_edit_subject_missing_fields_validation(self):
+        """POST /subjects/<id>/edit with empty code or name should fail validation and not alter DB."""
+        self.client.post("/subjects", data={"code": "BIO101", "name": "General Biology"}, follow_redirects=True)
+        conn = get_db_connection(TEST_DB_PATH)
+        sub_id = conn.execute("SELECT id FROM subjects WHERE code = 'BIO101';").fetchone()["id"]
+        conn.close()
+
+        # Missing code
+        res1 = self.client.post(
+            f"/subjects/{sub_id}/edit",
+            data={"code": "   ", "name": "New Name"},
+            follow_redirects=True,
+        )
+        self.assertEqual(res1.status_code, 200)
+        self.assertIn(b"Both Subject Code and Subject Name are required.", res1.data)
+
+        # Missing name
+        res2 = self.client.post(
+            f"/subjects/{sub_id}/edit",
+            data={"code": "BIO102", "name": "  "},
+            follow_redirects=True,
+        )
+        self.assertEqual(res2.status_code, 200)
+        self.assertIn(b"Both Subject Code and Subject Name are required.", res2.data)
+
+        # DB must remain unchanged
+        conn = get_db_connection(TEST_DB_PATH)
+        row = conn.execute("SELECT code, name FROM subjects WHERE id = ?;", (sub_id,)).fetchone()
+        conn.close()
+        self.assertEqual(row["code"], "BIO101")
+        self.assertEqual(row["name"], "General Biology")
+
+    def test_edit_subject_duplicate_code_prevention(self):
+        """POST /subjects/<id>/edit trying to rename to an existing subject's code should trigger duplicate error."""
+        self.client.post("/subjects", data={"code": "ENG101", "name": "English Composition"}, follow_redirects=True)
+        self.client.post("/subjects", data={"code": "HIST101", "name": "World History"}, follow_redirects=True)
+
+        conn = get_db_connection(TEST_DB_PATH)
+        hist_id = conn.execute("SELECT id FROM subjects WHERE code = 'HIST101';").fetchone()["id"]
+        conn.close()
+
+        # Attempt to rename HIST101 to eng101
+        res = self.client.post(
+            f"/subjects/{hist_id}/edit",
+            data={"code": "eng101", "name": "World History Revised"},
+            follow_redirects=True,
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertIn(b"already exists", res.data)
+
+        # Verify HIST101 was not renamed
+        conn = get_db_connection(TEST_DB_PATH)
+        row = conn.execute("SELECT code FROM subjects WHERE id = ?;", (hist_id,)).fetchone()
+        conn.close()
+        self.assertEqual(row["code"], "HIST101")
+
+    def test_edit_subject_nonexistent_id(self):
+        """POST /subjects/99999/edit should fail with subject not found flash."""
+        res = self.client.post(
+            "/subjects/99999/edit",
+            data={"code": "FAKE101", "name": "Fake Subject"},
+            follow_redirects=True,
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertIn(b"Subject not found", res.data)
+
+    def test_delete_subject_standalone_success(self):
+        """POST /subjects/<id>/delete for a standalone subject should delete row and decrement dashboard count."""
+        self.client.post("/subjects", data={"code": "CHEM101", "name": "General Chemistry"}, follow_redirects=True)
+        conn = get_db_connection(TEST_DB_PATH)
+        sub_id = conn.execute("SELECT id FROM subjects WHERE code = 'CHEM101';").fetchone()["id"]
+        conn.close()
+
+        # Verify dashboard shows 1 subject initially
+        res_dash1 = self.client.get("/")
+        self.assertIn(b">1<", res_dash1.data)
+
+        # Delete subject
+        res_del = self.client.post(f"/subjects/{sub_id}/delete", follow_redirects=True)
+        self.assertEqual(res_del.status_code, 200)
+        self.assertIn(b"deleted successfully", res_del.data)
+
+        # Verify row is gone from DB
+        conn = get_db_connection(TEST_DB_PATH)
+        row = conn.execute("SELECT * FROM subjects WHERE id = ?;", (sub_id,)).fetchone()
+        conn.close()
+        self.assertIsNone(row)
+
+        # Verify dashboard count is now 0
+        res_dash2 = self.client.get("/")
+        self.assertIn(b">0<", res_dash2.data)
+
+    def test_delete_subject_with_related_records_safe_transaction(self):
+        """
+        POST /subjects/<id>/delete for a subject with teacher qualifications, section requirements,
+        and timetable entries should safely delete all dependent records without foreign key errors.
+        """
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                sub_id = conn.execute("INSERT INTO subjects (code, name) VALUES ('CS101', 'Intro to CS');").lastrowid
+                t_id = conn.execute("INSERT INTO teachers (name, email) VALUES ('Prof. Turing', 'turing@ai.edu');").lastrowid
+                sec_id = conn.execute("INSERT INTO sections (name) VALUES ('CSE-A');").lastrowid
+                conn.execute("INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?);", (t_id, sub_id))
+                conn.execute("INSERT INTO section_requirements (section_id, subject_id, weekly_periods) VALUES (?, ?, 4);", (sec_id, sub_id))
+        finally:
+            conn.close()
+
+        # Generate routine -> 4 timetable entries
+        res_gen = self.client.post("/routine/generate", follow_redirects=True)
+        self.assertEqual(res_gen.status_code, 200)
+
+        # Verify initial counts in DB
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM subjects;").fetchone()["c"], 1)
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM teacher_subjects;").fetchone()["c"], 1)
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM section_requirements;").fetchone()["c"], 1)
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM timetable_entries;").fetchone()["c"], 4)
+        finally:
+            conn.close()
+
+        # Verify that setup page displays consequences warning in delete modal
+        res_setup = self.client.get("/setup?tab=subjects")
+        self.assertEqual(res_setup.status_code, 200)
+        self.assertIn(b"Consequences of Deletion", res_setup.data)
+        self.assertIn(b"faculty qualification", res_setup.data)
+        self.assertIn(b"section weekly requirement", res_setup.data)
+        self.assertIn(b"scheduled class period", res_setup.data)
+
+        # Delete subject
+        res_del = self.client.post(f"/subjects/{sub_id}/delete", follow_redirects=True)
+        self.assertEqual(res_del.status_code, 200)
+        self.assertIn(b"deleted successfully along with associated records", res_del.data)
+
+        # Verify safe transaction: subject and dependent rows deleted, parent teachers/sections preserved
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM subjects;").fetchone()["c"], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM teacher_subjects;").fetchone()["c"], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM section_requirements;").fetchone()["c"], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM timetable_entries;").fetchone()["c"], 0)
+            # Teachers and sections must still exist intact
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM teachers;").fetchone()["c"], 1)
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM sections;").fetchone()["c"], 1)
+        finally:
+            conn.close()
+
+        # Dashboard counts reflect deletion
+        res_dash = self.client.get("/")
+        self.assertIn(b">0<", res_dash.data)  # 0 subjects, 0 scheduled entries
+
+    def test_delete_subject_marks_timetable_outdated_when_routine_exists(self):
+        """
+        When a subject that is scheduled in the timetable is deleted,
+        GET /routine must display the timetable as Outdated and never as 'Published & Up to Date'.
+        """
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                sub1 = conn.execute("INSERT INTO subjects (code, name) VALUES ('CS101', 'Computer Science');").lastrowid
+                sub2 = conn.execute("INSERT INTO subjects (code, name) VALUES ('MATH101', 'Calculus');").lastrowid
+                t_id = conn.execute("INSERT INTO teachers (name, email) VALUES ('Dr. Euler', 'euler@math.org');").lastrowid
+                sec_id = conn.execute("INSERT INTO sections (name) VALUES ('SEC-1');").lastrowid
+                conn.execute("INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?);", (t_id, sub1))
+                conn.execute("INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?);", (t_id, sub2))
+                conn.execute("INSERT INTO section_requirements (section_id, subject_id, weekly_periods) VALUES (?, ?, 4);", (sec_id, sub1))
+                conn.execute("INSERT INTO section_requirements (section_id, subject_id, weekly_periods) VALUES (?, ?, 2);", (sec_id, sub2))
+        finally:
+            conn.close()
+
+        # Generate initial timetable (6 slots)
+        res_gen = self.client.post("/routine/generate", follow_redirects=True)
+        self.assertEqual(res_gen.status_code, 200)
+        self.assertIn(b"Published &amp; Up to Date", res_gen.data)
+
+        # Delete subject CS101
+        res_del = self.client.post(f"/subjects/{sub1}/delete", follow_redirects=True)
+        self.assertEqual(res_del.status_code, 200)
+
+        # Visit GET /routine -> Must show Outdated Timetable warning
+        res_routine = self.client.get("/routine")
+        self.assertEqual(res_routine.status_code, 200)
+        self.assertIn(b"Outdated Timetable", res_routine.data)
+        self.assertIn(b"Timetable Outdated", res_routine.data)
+        self.assertNotIn(b"Published &amp; Up to Date", res_routine.data)
+
+        # Regenerating routine should succeed and restore 'Published & Up to Date' for remaining setup
+        res_regen = self.client.post("/routine/generate", follow_redirects=True)
+        self.assertEqual(res_regen.status_code, 200)
+        self.assertIn(b"Published &amp; Up to Date", res_regen.data)
+
+    def test_delete_subject_nonexistent_id(self):
+        """POST /subjects/99999/delete should fail with subject not found flash."""
+        res = self.client.post("/subjects/99999/delete", follow_redirects=True)
+        self.assertEqual(res.status_code, 200)
+        self.assertIn(b"Subject not found", res.data)
 
     # =========================================================================
     # Step 2C Tests: Teacher Management & Subject Qualifications
@@ -461,6 +840,386 @@ class TestAppRoutesAndSubjects(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Teachers", response.data)
         self.assertIn(b">2<", response.data)
+
+    def test_setup_teachers_table_displays_edit_and_delete_actions_and_modals(self):
+        """GET /setup?tab=teachers should display Edit and Delete buttons and modals for each registered teacher."""
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                t_id = conn.execute("INSERT INTO teachers (name, email) VALUES ('Dr. Katherine Johnson', 'kjohnson@nasa.gov');").lastrowid
+                s_id = conn.execute("INSERT INTO subjects (code, name) VALUES ('MATH101', 'Orbital Mechanics');").lastrowid
+                conn.execute("INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?);", (t_id, s_id))
+        finally:
+            conn.close()
+
+        response = self.client.get("/setup?tab=teachers")
+        self.assertEqual(response.status_code, 200)
+        html = response.data.decode("utf-8")
+
+        self.assertIn("Actions", html)
+        self.assertIn("Edit", html)
+        self.assertIn("Delete", html)
+        self.assertIn(f"editTeacherModal{t_id}", html)
+        self.assertIn(f"deleteTeacherModal{t_id}", html)
+        self.assertIn(f"/teachers/{t_id}/edit", html)
+        self.assertIn(f"/teachers/{t_id}/delete", html)
+        self.assertIn("Dr. Katherine Johnson", html)
+        self.assertIn("kjohnson@nasa.gov", html)
+        self.assertIn("MATH101", html)
+
+    def test_edit_teacher_success_name_and_email(self):
+        """POST /teachers/<id>/edit should update name and email, redirect, and flash success."""
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                t_id = conn.execute("INSERT INTO teachers (name, email) VALUES ('Ada Lovelace', 'ada@example.edu');").lastrowid
+        finally:
+            conn.close()
+
+        # Update name and email
+        response = self.client.post(
+            f"/teachers/{t_id}/edit",
+            data={"name": "Lady Ada Lovelace", "email": "lady.ada@computing.org"},
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"updated successfully", response.data)
+        self.assertIn(b"Lady Ada Lovelace", response.data)
+        self.assertIn(b"lady.ada@computing.org", response.data)
+
+        # Direct database verification
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            row = conn.execute("SELECT name, email FROM teachers WHERE id = ?;", (t_id,)).fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row["name"], "Lady Ada Lovelace")
+            self.assertEqual(row["email"], "lady.ada@computing.org")
+        finally:
+            conn.close()
+
+        # Dashboard teacher count remains 1
+        res_dash = self.client.get("/")
+        self.assertIn(b">1<", res_dash.data)
+
+    def test_edit_teacher_without_email_clears_email(self):
+        """POST /teachers/<id>/edit with empty email should set email to NULL in database."""
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                t_id = conn.execute("INSERT INTO teachers (name, email) VALUES ('Prof. Turing', 'alan@bletchley.uk');").lastrowid
+        finally:
+            conn.close()
+
+        response = self.client.post(
+            f"/teachers/{t_id}/edit",
+            data={"name": "Prof. Alan Turing", "email": "   "},
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"updated successfully", response.data)
+        self.assertIn(b"Not provided", response.data)
+
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            row = conn.execute("SELECT name, email FROM teachers WHERE id = ?;", (t_id,)).fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row["name"], "Prof. Alan Turing")
+            self.assertIsNone(row["email"])
+        finally:
+            conn.close()
+
+    def test_edit_teacher_name_only_preserves_same_email(self):
+        """POST /teachers/<id>/edit keeping the existing email should not trigger duplicate collision."""
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                t_id = conn.execute("INSERT INTO teachers (name, email) VALUES ('Prof. Euler', 'euler@basel.ch');").lastrowid
+        finally:
+            conn.close()
+
+        response = self.client.post(
+            f"/teachers/{t_id}/edit",
+            data={"name": "Leonhard Euler", "email": "euler@basel.ch"},
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"updated successfully", response.data)
+
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            row = conn.execute("SELECT name, email FROM teachers WHERE id = ?;", (t_id,)).fetchone()
+            self.assertEqual(row["name"], "Leonhard Euler")
+            self.assertEqual(row["email"], "euler@basel.ch")
+        finally:
+            conn.close()
+
+    def test_edit_teacher_missing_name_validation(self):
+        """POST /teachers/<id>/edit with empty name should fail validation and not alter DB."""
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                t_id = conn.execute("INSERT INTO teachers (name, email) VALUES ('Dr. Gauss', 'gauss@gottingen.de');").lastrowid
+        finally:
+            conn.close()
+
+        response = self.client.post(
+            f"/teachers/{t_id}/edit",
+            data={"name": "   ", "email": "new.gauss@gottingen.de"},
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Teacher name is required.", response.data)
+
+        # Database record must remain untouched
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            row = conn.execute("SELECT name, email FROM teachers WHERE id = ?;", (t_id,)).fetchone()
+            self.assertEqual(row["name"], "Dr. Gauss")
+            self.assertEqual(row["email"], "gauss@gottingen.de")
+        finally:
+            conn.close()
+
+    def test_edit_teacher_duplicate_email_validation(self):
+        """POST /teachers/<id>/edit with an email belonging to another teacher should trigger duplicate error."""
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                t1_id = conn.execute("INSERT INTO teachers (name, email) VALUES ('Teacher One', 't1@university.edu');").lastrowid
+                t2_id = conn.execute("INSERT INTO teachers (name, email) VALUES ('Teacher Two', 't2@university.edu');").lastrowid
+        finally:
+            conn.close()
+
+        # Try updating Teacher Two with Teacher One's email (case-insensitive test)
+        response = self.client.post(
+            f"/teachers/{t2_id}/edit",
+            data={"name": "Teacher Two Modified", "email": "T1@UNIVERSITY.EDU"},
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"already exists", response.data)
+
+        # Verify Teacher Two was not updated
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            row = conn.execute("SELECT name, email FROM teachers WHERE id = ?;", (t2_id,)).fetchone()
+            self.assertEqual(row["name"], "Teacher Two")
+            self.assertEqual(row["email"], "t2@university.edu")
+        finally:
+            conn.close()
+
+    def test_edit_teacher_updating_qualifications(self):
+        """POST /teachers/<id>/edit should synchronize teacher qualifications (add new, remove omitted)."""
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                t_id = conn.execute("INSERT INTO teachers (name, email) VALUES ('Dr. Shannon', 'shannon@bell.labs');").lastrowid
+                s1_id = conn.execute("INSERT INTO subjects (code, name) VALUES ('INFO101', 'Information Theory');").lastrowid
+                s2_id = conn.execute("INSERT INTO subjects (code, name) VALUES ('MATH101', 'Discrete Math');").lastrowid
+                s3_id = conn.execute("INSERT INTO subjects (code, name) VALUES ('CS101', 'Digital Logic');").lastrowid
+                # Initially qualified for s1 and s2
+                conn.execute("INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?);", (t_id, s1_id))
+                conn.execute("INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?);", (t_id, s2_id))
+        finally:
+            conn.close()
+
+        # Edit teacher: keep s2, remove s1, add s3
+        response = self.client.post(
+            f"/teachers/{t_id}/edit",
+            data={"name": "Dr. Claude Shannon", "email": "shannon@bell.labs", "subject_ids": [str(s2_id), str(s3_id)]},
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"updated successfully", response.data)
+
+        # Verify qualifications in database
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            rows = conn.execute(
+                "SELECT subject_id FROM teacher_subjects WHERE teacher_id = ? ORDER BY subject_id ASC;",
+                (t_id,),
+            ).fetchall()
+            assigned_ids = [r["subject_id"] for r in rows]
+            assert s2_id is not None and s3_id is not None
+            self.assertEqual(assigned_ids, sorted([s2_id, s3_id]))
+            self.assertNotIn(s1_id, assigned_ids)
+        finally:
+            conn.close()
+
+    def test_edit_teacher_nonexistent_id(self):
+        """POST /teachers/99999/edit should fail with teacher not found flash."""
+        response = self.client.post(
+            "/teachers/99999/edit",
+            data={"name": "Ghost Teacher", "email": "ghost@uni.edu"},
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Teacher not found", response.data)
+
+    def test_delete_teacher_standalone_success(self):
+        """POST /teachers/<id>/delete for a standalone teacher should delete row and decrement dashboard count."""
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                t_id = conn.execute("INSERT INTO teachers (name, email) VALUES ('Prof. Fermat', 'fermat@margin.fr');").lastrowid
+        finally:
+            conn.close()
+
+        # Verify dashboard count is 1
+        res_dash1 = self.client.get("/")
+        self.assertIn(b">1<", res_dash1.data)
+
+        # Delete teacher
+        response = self.client.post(f"/teachers/{t_id}/delete", follow_redirects=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"deleted successfully", response.data)
+
+        # Verify record deleted from database
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            row = conn.execute("SELECT * FROM teachers WHERE id = ?;", (t_id,)).fetchone()
+            self.assertIsNone(row)
+        finally:
+            conn.close()
+
+        # Verify dashboard count is 0
+        res_dash2 = self.client.get("/")
+        self.assertIn(b">0<", res_dash2.data)
+
+    def test_delete_teacher_with_qualifications_and_timetable_entries_safe_transaction(self):
+        """
+        POST /teachers/<id>/delete for a teacher with qualifications and timetable entries
+        should safely delete dependent records in an atomic transaction and preserve other entities.
+        """
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                sub_id = conn.execute("INSERT INTO subjects (code, name) VALUES ('CS101', 'Computer Science');").lastrowid
+                t_id = conn.execute("INSERT INTO teachers (name, email) VALUES ('Dr. Turing', 'alan@ai.org');").lastrowid
+                sec_id = conn.execute("INSERT INTO sections (name) VALUES ('SEC-A');").lastrowid
+                conn.execute("INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?);", (t_id, sub_id))
+                conn.execute("INSERT INTO section_requirements (section_id, subject_id, weekly_periods) VALUES (?, ?, 4);", (sec_id, sub_id))
+        finally:
+            conn.close()
+
+        # Generate routine -> 4 timetable entries
+        res_gen = self.client.post("/routine/generate", follow_redirects=True)
+        self.assertEqual(res_gen.status_code, 200)
+
+        # Verify initial DB state
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM teachers;").fetchone()["c"], 1)
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM teacher_subjects;").fetchone()["c"], 1)
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM timetable_entries WHERE teacher_id = ?;", (t_id,)).fetchone()["c"], 4)
+        finally:
+            conn.close()
+
+        # Verify consequence warnings are rendered in Setup -> Teachers delete modal
+        res_setup = self.client.get("/setup?tab=teachers")
+        self.assertEqual(res_setup.status_code, 200)
+        self.assertIn(b"Consequences of Deletion", res_setup.data)
+        self.assertIn(b"subject qualification", res_setup.data)
+        self.assertIn(b"scheduled class period", res_setup.data)
+
+        # Delete teacher
+        res_del = self.client.post(f"/teachers/{t_id}/delete", follow_redirects=True)
+        self.assertEqual(res_del.status_code, 200)
+        self.assertIn(b"deleted successfully along with associated records", res_del.data)
+
+        # Verify safe transaction: teacher, teacher_subjects, and teacher's timetable entries deleted
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM teachers WHERE id = ?;", (t_id,)).fetchone()["c"], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM teacher_subjects WHERE teacher_id = ?;", (t_id,)).fetchone()["c"], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM timetable_entries WHERE teacher_id = ?;", (t_id,)).fetchone()["c"], 0)
+            # Subject and section must still exist intact
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM subjects WHERE id = ?;", (sub_id,)).fetchone()["c"], 1)
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM sections WHERE id = ?;", (sec_id,)).fetchone()["c"], 1)
+        finally:
+            conn.close()
+
+        # Dashboard counts updated
+        res_dash = self.client.get("/")
+        self.assertIn(b">0<", res_dash.data)
+
+    def test_delete_teacher_marks_timetable_outdated_when_routine_exists(self):
+        """
+        When a teacher who is scheduled in the timetable is deleted,
+        GET /routine must display the timetable as Outdated and never as 'Published & Up to Date'.
+        """
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                sub1 = conn.execute("INSERT INTO subjects (code, name) VALUES ('CS101', 'Intro to CS');").lastrowid
+                sub2 = conn.execute("INSERT INTO subjects (code, name) VALUES ('MATH101', 'Calculus');").lastrowid
+                t1 = conn.execute("INSERT INTO teachers (name, email) VALUES ('Dr. Turing', 'turing@ai.org');").lastrowid
+                t2 = conn.execute("INSERT INTO teachers (name, email) VALUES ('Dr. Euler', 'euler@math.org');").lastrowid
+                sec = conn.execute("INSERT INTO sections (name) VALUES ('BATCH-1');").lastrowid
+                conn.execute("INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?);", (t1, sub1))
+                conn.execute("INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?);", (t2, sub2))
+                conn.execute("INSERT INTO section_requirements (section_id, subject_id, weekly_periods) VALUES (?, ?, 3);", (sec, sub1))
+                conn.execute("INSERT INTO section_requirements (section_id, subject_id, weekly_periods) VALUES (?, ?, 2);", (sec, sub2))
+        finally:
+            conn.close()
+
+        # Generate routine
+        res_gen = self.client.post("/routine/generate", follow_redirects=True)
+        self.assertEqual(res_gen.status_code, 200)
+        self.assertIn(b"Published &amp; Up to Date", res_gen.data)
+
+        # Delete teacher 1
+        res_del = self.client.post(f"/teachers/{t1}/delete", follow_redirects=True)
+        self.assertEqual(res_del.status_code, 200)
+
+        # Check GET /routine -> Outdated Timetable
+        res_routine = self.client.get("/routine")
+        self.assertEqual(res_routine.status_code, 200)
+        self.assertIn(b"Outdated Timetable", res_routine.data)
+        self.assertIn(b"Timetable Outdated", res_routine.data)
+        self.assertNotIn(b"Published &amp; Up to Date", res_routine.data)
+
+    def test_edit_teacher_unqualifying_scheduled_subject_marks_timetable_outdated(self):
+        """
+        When editing a teacher removes qualifications for subjects currently scheduled in the timetable,
+        the timetable must be marked Outdated with a clear explanation.
+        """
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                sub_id = conn.execute("INSERT INTO subjects (code, name) VALUES ('CS101', 'Intro to CS');").lastrowid
+                t_id = conn.execute("INSERT INTO teachers (name, email) VALUES ('Dr. Turing', 'turing@ai.org');").lastrowid
+                sec_id = conn.execute("INSERT INTO sections (name) VALUES ('BATCH-1');").lastrowid
+                conn.execute("INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?);", (t_id, sub_id))
+                conn.execute("INSERT INTO section_requirements (section_id, subject_id, weekly_periods) VALUES (?, ?, 4);", (sec_id, sub_id))
+        finally:
+            conn.close()
+
+        # Generate routine
+        res_gen = self.client.post("/routine/generate", follow_redirects=True)
+        self.assertEqual(res_gen.status_code, 200)
+        self.assertIn(b"Published &amp; Up to Date", res_gen.data)
+
+        # Edit teacher to remove qualification for CS101 (pass empty subject_ids)
+        res_edit = self.client.post(
+            f"/teachers/{t_id}/edit",
+            data={"name": "Dr. Turing", "email": "turing@ai.org", "subject_ids": []},
+            follow_redirects=True,
+        )
+        self.assertEqual(res_edit.status_code, 200)
+        self.assertIn(b"updated successfully", res_edit.data)
+
+        # Timetable must now be marked Outdated
+        res_routine = self.client.get("/routine")
+        self.assertEqual(res_routine.status_code, 200)
+        self.assertIn(b"Outdated Timetable", res_routine.data)
+        self.assertIn(b"Timetable Outdated", res_routine.data)
+        self.assertNotIn(b"Published &amp; Up to Date", res_routine.data)
+
+    def test_delete_teacher_nonexistent_id(self):
+        """POST /teachers/99999/delete should fail with teacher not found flash."""
+        res = self.client.post("/teachers/99999/delete", follow_redirects=True)
+        self.assertEqual(res.status_code, 200)
+        self.assertIn(b"Teacher not found", res.data)
 
     # =========================================================================
     # Step 2D Tests: Section Management & Weekly Subject Requirements

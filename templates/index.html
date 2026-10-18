@@ -18,34 +18,52 @@
 <!-- Overview Stats Cards -->
 <div class="row g-3 mb-4">
     <div class="col-sm-6 col-lg-3">
-        <div class="card h-100 shadow-sm border-0 stat-card">
+        <a
+            href="{{ url_for('setup', tab='subjects') }}"
+            id="card-subjects"
+            class="card h-100 shadow-sm border-0 stat-card stat-card-link text-decoration-none"
+            role="link"
+            aria-label="Subjects: {{ counts.subjects }} curriculum course units. Click to manage subjects."
+        >
             <div class="card-body">
                 <div class="text-muted small text-uppercase fw-semibold mb-1">Subjects</div>
                 <div class="display-6 fw-bold text-primary">{{ counts.subjects }}</div>
                 <div class="text-muted small mt-2">Curriculum course units</div>
             </div>
-        </div>
+        </a>
     </div>
     <div class="col-sm-6 col-lg-3">
-        <div class="card h-100 shadow-sm border-0 stat-card">
+        <a
+            href="{{ url_for('setup', tab='teachers') }}"
+            id="card-teachers"
+            class="card h-100 shadow-sm border-0 stat-card stat-card-link text-decoration-none"
+            role="link"
+            aria-label="Teachers: {{ counts.teachers }} faculty members. Click to manage teachers and qualifications."
+        >
             <div class="card-body">
                 <div class="text-muted small text-uppercase fw-semibold mb-1">Teachers</div>
                 <div class="display-6 fw-bold text-success">{{ counts.teachers }}</div>
                 <div class="text-muted small mt-2">Faculty members</div>
             </div>
-        </div>
+        </a>
     </div>
     <div class="col-sm-6 col-lg-3">
-        <div class="card h-100 shadow-sm border-0 stat-card">
+        <a
+            href="{{ url_for('setup', tab='sections') }}"
+            id="card-sections"
+            class="card h-100 shadow-sm border-0 stat-card stat-card-link text-decoration-none"
+            role="link"
+            aria-label="Sections: {{ counts.sections }} student cohorts. Click to manage sections and requirements."
+        >
             <div class="card-body">
                 <div class="text-muted small text-uppercase fw-semibold mb-1">Sections</div>
                 <div class="display-6 fw-bold text-info">{{ counts.sections }}</div>
                 <div class="text-muted small mt-2">Student cohorts</div>
             </div>
-        </div>
+        </a>
     </div>
     <div class="col-sm-6 col-lg-3">
-        <div class="card h-100 shadow-sm border-0 stat-card">
+        <div id="card-entries" class="card h-100 shadow-sm border-0 stat-card">
             <div class="card-body">
                 <div class="text-muted small text-uppercase fw-semibold mb-1">Scheduled Entries</div>
                 <div class="display-6 fw-bold text-warning">{{ counts.entries }}</div>

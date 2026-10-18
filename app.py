@@ -9,7 +9,7 @@ import os
 import sqlite3
 from typing import Any
 
-from flask import Flask, flash, g, redirect, render_template, request, session, url_for
+from flask import Flask, flash, g, has_request_context, redirect, render_template, request, session, url_for
 
 from database import DATABASE_PATH, get_db_connection
 from scheduler import DAYS, PERIODS, generate_schedule
@@ -69,7 +69,14 @@ def setup():
     """
     db = get_db()
     subjects = db.execute(
-        "SELECT id, code, name FROM subjects ORDER BY code ASC;"
+        """
+        SELECT s.id, s.code, s.name,
+               (SELECT COUNT(*) FROM teacher_subjects ts WHERE ts.subject_id = s.id) AS teacher_count,
+               (SELECT COUNT(*) FROM section_requirements sr WHERE sr.subject_id = s.id) AS requirement_count,
+               (SELECT COUNT(*) FROM timetable_entries te WHERE te.subject_id = s.id) AS timetable_count
+        FROM subjects s
+        ORDER BY s.code ASC;
+        """
     ).fetchall()
 
     # Retrieve all teachers ordered by name
@@ -96,11 +103,20 @@ def setup():
             "name": row["subject_name"],
         })
 
-    # Build teacher objects with embedded qualifications
+    # Query scheduled timetable entries count per teacher
+    teacher_tt_rows = db.execute(
+        "SELECT teacher_id, COUNT(*) AS count FROM timetable_entries GROUP BY teacher_id;"
+    ).fetchall()
+    teacher_tt_map = {row["teacher_id"]: row["count"] for row in teacher_tt_rows}
+
+    # Build teacher objects with embedded qualifications and timetable counts
     teachers = []
     for t in teachers_rows:
         t_dict = dict(t)
-        t_dict["subjects"] = teacher_qualifications.get(t["id"], [])
+        t_subs = teacher_qualifications.get(t["id"], [])
+        t_dict["subjects"] = t_subs
+        t_dict["subject_ids"] = [s["id"] for s in t_subs]
+        t_dict["timetable_count"] = teacher_tt_map.get(t["id"], 0)
         teachers.append(t_dict)
 
     # Retrieve all sections ordered by name
@@ -139,7 +155,8 @@ def setup():
         sec_dict["total_periods"] = sum(r["weekly_periods"] for r in sec_reqs)
         sections.append(sec_dict)
 
-    active_tab = request.args.get("tab", "subjects")
+    raw_tab = request.args.get("tab", "subjects").strip().lower()
+    active_tab = raw_tab if raw_tab in ("subjects", "teachers", "sections") else "subjects"
     return render_template(
         "setup.html",
         subjects=subjects,
@@ -176,7 +193,150 @@ def add_subject():
     except sqlite3.IntegrityError:
         flash(f"A subject with code '{code}' already exists. Please choose a unique code.", "danger")
 
-    return redirect(url_for("setup"))
+    return redirect(url_for("setup", tab="subjects"))
+
+
+@app.route("/subjects/<int:subject_id>/edit", methods=["POST"])
+@app.route("/subjects/edit", methods=["POST"])
+def edit_subject(subject_id: int | None = None):
+    """
+    POST route to edit an existing academic subject.
+    Validates required fields, auto-uppercases code, prevents duplicate code collisions,
+    and updates the subject record using a parameterized UPDATE query.
+    """
+    if subject_id is None:
+        subject_id_raw = request.form.get("subject_id", "").strip()
+        try:
+            subject_id = int(subject_id_raw)
+        except ValueError:
+            flash("Invalid subject ID.", "danger")
+            return redirect(url_for("setup", tab="subjects"))
+
+    code = request.form.get("code", "").strip().upper()
+    name = request.form.get("name", "").strip()
+
+    # 1. Validation for missing fields
+    if not code or not name:
+        flash("Both Subject Code and Subject Name are required.", "danger")
+        return redirect(url_for("setup", tab="subjects"))
+
+    db = get_db()
+
+    # 2. Verify that the subject exists
+    existing = db.execute("SELECT id, code, name FROM subjects WHERE id = ?;", (subject_id,)).fetchone()
+    if not existing:
+        flash("Subject not found.", "danger")
+        return redirect(url_for("setup", tab="subjects"))
+
+    # 3. Prevent duplicate code collision with any other subject
+    duplicate = db.execute(
+        "SELECT id, code FROM subjects WHERE code = ? AND id != ?;",
+        (code, subject_id),
+    ).fetchone()
+    if duplicate:
+        flash(f"A subject with code '{code}' already exists. Please choose a unique code.", "danger")
+        return redirect(url_for("setup", tab="subjects"))
+
+    old_code = existing["code"]
+
+    # 4. Parameterized UPDATE query in a transaction
+    try:
+        with db:
+            db.execute(
+                "UPDATE subjects SET code = ?, name = ? WHERE id = ?;",
+                (code, name, subject_id),
+            )
+        flash(f"Subject '{old_code}' updated successfully to '{code} - {name}'!", "success")
+    except sqlite3.IntegrityError:
+        flash(f"A subject with code '{code}' already exists. Please choose a unique code.", "danger")
+    except Exception as e:
+        db.rollback()
+        flash(f"Database error while updating subject: {str(e)}", "danger")
+
+    return redirect(url_for("setup", tab="subjects"))
+
+
+@app.route("/subjects/<int:subject_id>/delete", methods=["POST"])
+@app.route("/subjects/delete", methods=["POST"])
+def delete_subject(subject_id: int | None = None):
+    """
+    POST route to delete an existing academic subject.
+    Safely inspects and removes all dependent records in a single atomic transaction:
+      1. timetable_entries referencing this subject
+      2. section_requirements referencing this subject
+      3. teacher_subjects referencing this subject
+      4. the subject itself
+    Never leaves orphaned records and marks the timetable outdated if affected.
+    """
+    if subject_id is None:
+        subject_id_raw = request.form.get("subject_id", "").strip()
+        try:
+            subject_id = int(subject_id_raw)
+        except ValueError:
+            flash("Invalid subject ID.", "danger")
+            return redirect(url_for("setup", tab="subjects"))
+
+    db = get_db()
+
+    # 1. Verify subject exists
+    subject = db.execute("SELECT id, code, name FROM subjects WHERE id = ?;", (subject_id,)).fetchone()
+    if not subject:
+        flash("Subject not found.", "danger")
+        return redirect(url_for("setup", tab="subjects"))
+
+    code = subject["code"]
+    name = subject["name"]
+
+    # 2. Explicitly inspect dependent records
+    teacher_count = db.execute(
+        "SELECT COUNT(*) AS count FROM teacher_subjects WHERE subject_id = ?;", (subject_id,)
+    ).fetchone()["count"]
+    req_count = db.execute(
+        "SELECT COUNT(*) AS count FROM section_requirements WHERE subject_id = ?;", (subject_id,)
+    ).fetchone()["count"]
+    tt_count = db.execute(
+        "SELECT COUNT(*) AS count FROM timetable_entries WHERE subject_id = ?;", (subject_id,)
+    ).fetchone()["count"]
+
+    # 3. Explicit safe transaction deleting related records in dependency order
+    try:
+        with db:
+            if tt_count > 0:
+                db.execute("DELETE FROM timetable_entries WHERE subject_id = ?;", (subject_id,))
+            if req_count > 0:
+                db.execute("DELETE FROM section_requirements WHERE subject_id = ?;", (subject_id,))
+            if teacher_count > 0:
+                db.execute("DELETE FROM teacher_subjects WHERE subject_id = ?;", (subject_id,))
+            db.execute("DELETE FROM subjects WHERE id = ?;", (subject_id,))
+
+        if teacher_count > 0 or req_count > 0 or tt_count > 0:
+            details = []
+            if teacher_count:
+                details.append(f"{teacher_count} teacher qualification(s)")
+            if req_count:
+                details.append(f"{req_count} section requirement(s)")
+            if tt_count:
+                details.append(f"{tt_count} timetable entry/entries")
+            flash(
+                f"Subject '{code} - {name}' deleted successfully along with associated records ({', '.join(details)}).",
+                "warning",
+            )
+            # Mark timetable outdated if timetable or requirements were impacted
+            if tt_count > 0 or req_count > 0:
+                session["timetable_outdated"] = True
+                reasons = session.get("outdated_reasons", [])
+                reasons.append(
+                    f"Subject '{code}' was deleted, removing {tt_count} scheduled slot(s) and {req_count} requirement(s)."
+                )
+                session["outdated_reasons"] = reasons
+        else:
+            flash(f"Subject '{code} - {name}' deleted successfully.", "success")
+
+    except Exception as e:
+        db.rollback()
+        flash(f"Database error while deleting subject '{code}': {str(e)}", "danger")
+
+    return redirect(url_for("setup", tab="subjects"))
 
 
 @app.route("/teachers", methods=["POST"])
@@ -206,6 +366,194 @@ def add_teacher():
         flash(f"Teacher '{name}' added successfully!", "success")
     except sqlite3.IntegrityError:
         flash(f"A teacher with email '{email}' already exists. Please choose a unique email.", "danger")
+
+    return redirect(url_for("setup", tab="teachers"))
+
+
+@app.route("/teachers/<int:teacher_id>/edit", methods=["POST"])
+@app.route("/teachers/edit", methods=["POST"])
+def edit_teacher(teacher_id: int | None = None):
+    """
+    POST route to edit an existing faculty member's details and qualifications.
+    Validates name (required), processes optional email, prevents email collisions,
+    synchronizes qualified subjects in an atomic transaction,
+    and marks the timetable outdated if any scheduled routine periods are invalidated.
+    """
+    if teacher_id is None:
+        teacher_id_raw = request.form.get("teacher_id", "").strip()
+        try:
+            teacher_id = int(teacher_id_raw)
+        except ValueError:
+            flash("Invalid teacher ID.", "danger")
+            return redirect(url_for("setup", tab="teachers"))
+
+    name = request.form.get("name", "").strip()
+    raw_email = request.form.get("email", "").strip()
+    email = raw_email if raw_email else None
+    subject_ids_raw = request.form.getlist("subject_ids")
+
+    # 1. Server-side validation: Teacher name is required
+    if not name:
+        flash("Teacher name is required.", "danger")
+        return redirect(url_for("setup", tab="teachers"))
+
+    db = get_db()
+
+    # 2. Verify that the teacher exists
+    existing = db.execute("SELECT id, name, email FROM teachers WHERE id = ?;", (teacher_id,)).fetchone()
+    if not existing:
+        flash("Teacher not found.", "danger")
+        return redirect(url_for("setup", tab="teachers"))
+
+    # 3. Check for unique email collision if email provided
+    if email:
+        dup_email = db.execute(
+            "SELECT id, name FROM teachers WHERE LOWER(email) = LOWER(?) AND id != ?;",
+            (email, teacher_id),
+        ).fetchone()
+        if dup_email:
+            flash(f"A teacher with email '{email}' already exists. Please choose a unique email.", "danger")
+            return redirect(url_for("setup", tab="teachers"))
+
+    # 4. Parse and validate subject_ids
+    selected_subject_ids = []
+    for s_raw in subject_ids_raw:
+        try:
+            selected_subject_ids.append(int(s_raw))
+        except (ValueError, TypeError):
+            pass
+    selected_subject_ids = list(dict.fromkeys(selected_subject_ids))
+
+    if selected_subject_ids:
+        placeholders = ",".join("?" for _ in selected_subject_ids)
+        found_count = db.execute(
+            f"SELECT COUNT(*) AS c FROM subjects WHERE id IN ({placeholders});",
+            selected_subject_ids,
+        ).fetchone()["c"]
+        if found_count != len(selected_subject_ids):
+            flash("One or more selected subjects do not exist.", "danger")
+            return redirect(url_for("setup", tab="teachers"))
+
+    # 5. Check if qualification change affects existing scheduled timetable slots
+    current_quals = {
+        r["subject_id"]
+        for r in db.execute(
+            "SELECT subject_id FROM teacher_subjects WHERE teacher_id = ?;", (teacher_id,)
+        ).fetchall()
+    }
+    removed_quals = current_quals - set(selected_subject_ids)
+    affected_slots = 0
+    if removed_quals:
+        placeholders = ",".join("?" for _ in removed_quals)
+        affected_slots = db.execute(
+            f"SELECT COUNT(*) AS c FROM timetable_entries WHERE teacher_id = ? AND subject_id IN ({placeholders});",
+            [teacher_id, *removed_quals],
+        ).fetchone()["c"]
+
+    # 6. Execute atomic update transaction
+    try:
+        with db:
+            db.execute(
+                "UPDATE teachers SET name = ?, email = ? WHERE id = ?;",
+                (name, email, teacher_id),
+            )
+            # Re-synchronize qualifications
+            db.execute("DELETE FROM teacher_subjects WHERE teacher_id = ?;", (teacher_id,))
+            for s_id in selected_subject_ids:
+                db.execute(
+                    "INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?);",
+                    (teacher_id, s_id),
+                )
+
+        flash(f"Teacher '{name}' updated successfully!", "success")
+
+        # Mark timetable outdated if removed qualifications invalidate scheduled timetable entries
+        if affected_slots > 0:
+            session["timetable_outdated"] = True
+            reasons = session.get("outdated_reasons", [])
+            reasons.append(
+                f"Teacher '{name}' was unqualified for one or more subjects scheduled in {affected_slots} timetable period(s)."
+            )
+            session["outdated_reasons"] = reasons
+
+    except sqlite3.IntegrityError:
+        flash(f"A teacher with email '{email}' already exists. Please choose a unique email.", "danger")
+    except Exception as e:
+        db.rollback()
+        flash(f"Database error while updating teacher: {str(e)}", "danger")
+
+    return redirect(url_for("setup", tab="teachers"))
+
+
+@app.route("/teachers/<int:teacher_id>/delete", methods=["POST"])
+@app.route("/teachers/delete", methods=["POST"])
+def delete_teacher(teacher_id: int | None = None):
+    """
+    POST route to delete an existing faculty member.
+    Safely inspects and removes all dependent records in a single atomic transaction:
+      1. timetable_entries referencing this teacher
+      2. teacher_subjects referencing this teacher
+      3. the teacher record itself
+    Never leaves orphaned records and marks the timetable outdated if affected.
+    """
+    if teacher_id is None:
+        teacher_id_raw = request.form.get("teacher_id", "").strip()
+        try:
+            teacher_id = int(teacher_id_raw)
+        except ValueError:
+            flash("Invalid teacher ID.", "danger")
+            return redirect(url_for("setup", tab="teachers"))
+
+    db = get_db()
+
+    # 1. Verify that the teacher exists
+    teacher = db.execute("SELECT id, name, email FROM teachers WHERE id = ?;", (teacher_id,)).fetchone()
+    if not teacher:
+        flash("Teacher not found.", "danger")
+        return redirect(url_for("setup", tab="teachers"))
+
+    name = teacher["name"]
+
+    # 2. Inspect dependent records
+    qual_count = db.execute(
+        "SELECT COUNT(*) AS count FROM teacher_subjects WHERE teacher_id = ?;", (teacher_id,)
+    ).fetchone()["count"]
+    tt_count = db.execute(
+        "SELECT COUNT(*) AS count FROM timetable_entries WHERE teacher_id = ?;", (teacher_id,)
+    ).fetchone()["count"]
+
+    # 3. Explicit safe transaction deleting related records in dependency order
+    try:
+        with db:
+            if tt_count > 0:
+                db.execute("DELETE FROM timetable_entries WHERE teacher_id = ?;", (teacher_id,))
+            if qual_count > 0:
+                db.execute("DELETE FROM teacher_subjects WHERE teacher_id = ?;", (teacher_id,))
+            db.execute("DELETE FROM teachers WHERE id = ?;", (teacher_id,))
+
+        if qual_count > 0 or tt_count > 0:
+            details = []
+            if qual_count:
+                details.append(f"{qual_count} qualification(s)")
+            if tt_count:
+                details.append(f"{tt_count} timetable slot(s)")
+            flash(
+                f"Teacher '{name}' deleted successfully along with associated records ({', '.join(details)}).",
+                "warning",
+            )
+            if tt_count > 0:
+                session["timetable_outdated"] = True
+                reasons = session.get("outdated_reasons", [])
+                reasons.append(
+                    f"Teacher '{name}' was deleted, removing {tt_count} scheduled timetable period(s)."
+                )
+                session["outdated_reasons"] = reasons
+        else:
+            flash(f"Teacher '{name}' deleted successfully.", "success")
+
+    except Exception as e:
+        db.rollback()
+        flash(f"Database error while deleting teacher '{name}': {str(e)}", "danger")
 
     return redirect(url_for("setup", tab="teachers"))
 
@@ -526,6 +874,16 @@ def get_timetable_sync_status(db):
     outdated_reasons = []
     is_outdated = False
 
+    if has_request_context() and session.get("timetable_outdated"):
+        is_outdated = True
+        for r in session.get("outdated_reasons", []):
+            if r not in outdated_reasons:
+                outdated_reasons.append(r)
+        if not session.get("outdated_reasons"):
+            outdated_reasons.append(
+                "Academic setup was modified after timetable generation. Please regenerate the routine."
+            )
+
     if req_map != sched_map:
         is_outdated = True
         outdated_reasons.append(
@@ -687,8 +1045,10 @@ def generate_routine():
                     ),
                 )
 
-        # Clear any prior generation error upon success
+        # Clear any prior generation error and outdated flags upon success
         session.pop("last_generation_error", None)
+        session.pop("timetable_outdated", None)
+        session.pop("outdated_reasons", None)
 
         flash(
             f"Timetable successfully generated and published! ({len(schedule_entries)} total class periods scheduled).",

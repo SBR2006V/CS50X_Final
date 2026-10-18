@@ -133,9 +133,10 @@
                                 <table class="table table-hover align-middle mb-0">
                                     <thead class="table-light">
                                         <tr>
-                                            <th scope="col" class="ps-4" style="width: 10%;">#</th>
-                                            <th scope="col" style="width: 30%;">Subject Code</th>
-                                            <th scope="col" style="width: 60%;">Subject Name</th>
+                                            <th scope="col" class="ps-4" style="width: 8%;">#</th>
+                                            <th scope="col" style="width: 24%;">Subject Code</th>
+                                            <th scope="col" style="width: 44%;">Subject Name</th>
+                                            <th scope="col" class="text-end pe-4" style="width: 24%;">Actions</th>
                                         </tr>
                                     </thead>
                                     <tbody>
@@ -147,7 +148,168 @@
                                                         {{ subject['code'] }}
                                                     </span>
                                                 </td>
-                                                <td class="fw-medium text-dark">{{ subject['name'] }}</td>
+                                                <td>
+                                                    <div class="fw-medium text-dark">{{ subject['name'] }}</div>
+                                                    {% if subject['teacher_count'] > 0 or subject['requirement_count'] > 0 or subject['timetable_count'] > 0 %}
+                                                        <div class="small text-muted mt-1">
+                                                            <span class="badge bg-secondary-subtle text-secondary border me-1" title="Teacher qualifications">
+                                                                👨‍🏫 {{ subject['teacher_count'] }}
+                                                            </span>
+                                                            <span class="badge bg-secondary-subtle text-secondary border me-1" title="Section requirements">
+                                                                👥 {{ subject['requirement_count'] }}
+                                                            </span>
+                                                            {% if subject['timetable_count'] > 0 %}
+                                                                <span class="badge bg-primary-subtle text-primary border border-primary-subtle" title="Scheduled routine slots">
+                                                                    📅 {{ subject['timetable_count'] }}
+                                                                </span>
+                                                            {% endif %}
+                                                        </div>
+                                                    {% endif %}
+                                                </td>
+                                                <td class="text-end pe-4">
+                                                    <div class="btn-group btn-group-sm" role="group" aria-label="Subject Actions">
+                                                        <button
+                                                            type="button"
+                                                            class="btn btn-outline-primary"
+                                                            data-bs-toggle="modal"
+                                                            data-bs-target="#editSubjectModal{{ subject['id'] }}"
+                                                            title="Edit {{ subject['code'] }}"
+                                                            aria-label="Edit Subject {{ subject['code'] }}"
+                                                        >
+                                                            ✏️ Edit
+                                                        </button>
+                                                        <button
+                                                            type="button"
+                                                            class="btn btn-outline-danger"
+                                                            data-bs-toggle="modal"
+                                                            data-bs-target="#deleteSubjectModal{{ subject['id'] }}"
+                                                            title="Delete {{ subject['code'] }}"
+                                                            aria-label="Delete Subject {{ subject['code'] }}"
+                                                        >
+                                                            🗑️ Delete
+                                                        </button>
+                                                    </div>
+
+                                                    <!-- Edit Subject Modal -->
+                                                    <div
+                                                        class="modal fade text-start"
+                                                        id="editSubjectModal{{ subject['id'] }}"
+                                                        tabindex="-1"
+                                                        aria-labelledby="editSubjectModalLabel{{ subject['id'] }}"
+                                                        aria-hidden="true"
+                                                    >
+                                                        <div class="modal-dialog modal-dialog-centered">
+                                                            <div class="modal-content border-0 shadow">
+                                                                <div class="modal-header bg-light">
+                                                                    <h5 class="modal-title fw-bold" id="editSubjectModalLabel{{ subject['id'] }}">
+                                                                        ✏️ Edit Subject: <span class="text-primary font-monospace">{{ subject['code'] }}</span>
+                                                                    </h5>
+                                                                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                                                                </div>
+                                                                <form action="{{ url_for('edit_subject', subject_id=subject['id']) }}" method="POST" autocomplete="off">
+                                                                    <input type="hidden" name="subject_id" value="{{ subject['id'] }}">
+                                                                    <div class="modal-body">
+                                                                        <div class="mb-3">
+                                                                            <label for="edit_code_{{ subject['id'] }}" class="form-label fw-semibold">
+                                                                                Subject Code <span class="text-danger">*</span>
+                                                                            </label>
+                                                                            <input
+                                                                                type="text"
+                                                                                class="form-control text-uppercase font-monospace"
+                                                                                id="edit_code_{{ subject['id'] }}"
+                                                                                name="code"
+                                                                                value="{{ subject['code'] }}"
+                                                                                maxlength="20"
+                                                                                required
+                                                                            >
+                                                                            <div class="form-text">Must be unique (e.g., CS101, MATH201).</div>
+                                                                        </div>
+                                                                        <div class="mb-3">
+                                                                            <label for="edit_name_{{ subject['id'] }}" class="form-label fw-semibold">
+                                                                                Subject Name <span class="text-danger">*</span>
+                                                                            </label>
+                                                                            <input
+                                                                                type="text"
+                                                                                class="form-control"
+                                                                                id="edit_name_{{ subject['id'] }}"
+                                                                                name="name"
+                                                                                value="{{ subject['name'] }}"
+                                                                                maxlength="100"
+                                                                                required
+                                                                            >
+                                                                            <div class="form-text">Full title of the curriculum course.</div>
+                                                                        </div>
+                                                                    </div>
+                                                                    <div class="modal-footer bg-light">
+                                                                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                                                                        <button type="submit" class="btn btn-primary fw-semibold">Save Changes</button>
+                                                                    </div>
+                                                                </form>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+
+                                                    <!-- Delete Subject Modal -->
+                                                    <div
+                                                        class="modal fade text-start"
+                                                        id="deleteSubjectModal{{ subject['id'] }}"
+                                                        tabindex="-1"
+                                                        aria-labelledby="deleteSubjectModalLabel{{ subject['id'] }}"
+                                                        aria-hidden="true"
+                                                    >
+                                                        <div class="modal-dialog modal-dialog-centered">
+                                                            <div class="modal-content border-0 shadow">
+                                                                <div class="modal-header bg-danger-subtle text-danger-emphasis">
+                                                                    <h5 class="modal-title fw-bold" id="deleteSubjectModalLabel{{ subject['id'] }}">
+                                                                        ⚠️ Confirm Delete Subject
+                                                                    </h5>
+                                                                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                                                                </div>
+                                                                <form action="{{ url_for('delete_subject', subject_id=subject['id']) }}" method="POST">
+                                                                    <input type="hidden" name="subject_id" value="{{ subject['id'] }}">
+                                                                    <div class="modal-body">
+                                                                        <p class="mb-3">
+                                                                            Are you sure you want to delete subject
+                                                                            <strong class="font-monospace text-primary">{{ subject['code'] }}</strong>
+                                                                            &mdash; <strong>{{ subject['name'] }}</strong>?
+                                                                        </p>
+
+                                                                        {% if subject['teacher_count'] > 0 or subject['requirement_count'] > 0 or subject['timetable_count'] > 0 %}
+                                                                            <div class="alert alert-warning border-warning small mb-3">
+                                                                                <h6 class="alert-heading fw-bold mb-1">Consequences of Deletion:</h6>
+                                                                                <p class="mb-2">This subject is currently in use. Deleting it will safely remove all related records in an atomic transaction:</p>
+                                                                                <ul class="mb-2 ps-3">
+                                                                                    {% if subject['teacher_count'] > 0 %}
+                                                                                        <li><strong>{{ subject['teacher_count'] }}</strong> faculty qualification(s) will be unassigned.</li>
+                                                                                    {% endif %}
+                                                                                    {% if subject['requirement_count'] > 0 %}
+                                                                                        <li><strong>{{ subject['requirement_count'] }}</strong> section weekly requirement(s) will be removed.</li>
+                                                                                    {% endif %}
+                                                                                    {% if subject['timetable_count'] > 0 %}
+                                                                                        <li><strong>{{ subject['timetable_count'] }}</strong> scheduled class period(s) in the published routine will be deleted.</li>
+                                                                                    {% endif %}
+                                                                                </ul>
+                                                                                <div class="text-danger fw-semibold">
+                                                                                    ⚠️ Any existing timetable will be marked outdated and must be regenerated.
+                                                                                </div>
+                                                                            </div>
+                                                                        {% else %}
+                                                                            <div class="alert alert-light border small text-muted mb-0">
+                                                                                ℹ️ This subject has no assigned teachers, section requirements, or routine entries. It can be safely removed.
+                                                                            </div>
+                                                                        {% endif %}
+                                                                    </div>
+                                                                    <div class="modal-footer bg-light">
+                                                                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                                                                        <button type="submit" class="btn btn-danger fw-semibold">
+                                                                            Yes, Delete Subject
+                                                                        </button>
+                                                                    </div>
+                                                                </form>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </td>
                                             </tr>
                                         {% endfor %}
                                     </tbody>
@@ -310,17 +472,25 @@
                                 <table class="table table-hover align-middle mb-0">
                                     <thead class="table-light">
                                         <tr>
-                                            <th scope="col" class="ps-4" style="width: 8%;">#</th>
-                                            <th scope="col" style="width: 30%;">Teacher Name</th>
-                                            <th scope="col" style="width: 27%;">Email</th>
-                                            <th scope="col" style="width: 35%;">Qualified Subjects</th>
+                                            <th scope="col" class="ps-4" style="width: 6%;">#</th>
+                                            <th scope="col" style="width: 26%;">Teacher Name</th>
+                                            <th scope="col" style="width: 24%;">Email</th>
+                                            <th scope="col" style="width: 24%;">Qualified Subjects</th>
+                                            <th scope="col" class="text-end pe-4" style="width: 20%;">Actions</th>
                                         </tr>
                                     </thead>
                                     <tbody>
                                         {% for teacher in teachers %}
                                             <tr>
                                                 <td class="ps-4 text-muted">{{ loop.index }}</td>
-                                                <td class="fw-medium text-dark">{{ teacher.name }}</td>
+                                                <td class="fw-medium text-dark">
+                                                    {{ teacher.name }}
+                                                    {% if teacher.timetable_count > 0 %}
+                                                        <span class="badge bg-primary-subtle text-primary border border-primary-subtle ms-1 small" title="Scheduled in published routine">
+                                                            📅 {{ teacher.timetable_count }}
+                                                        </span>
+                                                    {% endif %}
+                                                </td>
                                                 <td>
                                                     {% if teacher.email %}
                                                         <span class="text-secondary small font-monospace">{{ teacher.email }}</span>
@@ -343,6 +513,176 @@
                                                     {% else %}
                                                         <span class="text-muted small fst-italic">No subjects assigned</span>
                                                     {% endif %}
+                                                </td>
+                                                <td class="text-end pe-4">
+                                                    <div class="btn-group btn-group-sm" role="group" aria-label="Teacher Actions">
+                                                        <button
+                                                            type="button"
+                                                            class="btn btn-outline-primary"
+                                                            data-bs-toggle="modal"
+                                                            data-bs-target="#editTeacherModal{{ teacher.id }}"
+                                                            title="Edit {{ teacher.name }}"
+                                                            aria-label="Edit Teacher {{ teacher.name }}"
+                                                        >
+                                                            ✏️ Edit
+                                                        </button>
+                                                        <button
+                                                            type="button"
+                                                            class="btn btn-outline-danger"
+                                                            data-bs-toggle="modal"
+                                                            data-bs-target="#deleteTeacherModal{{ teacher.id }}"
+                                                            title="Delete {{ teacher.name }}"
+                                                            aria-label="Delete Teacher {{ teacher.name }}"
+                                                        >
+                                                            🗑️ Delete
+                                                        </button>
+                                                    </div>
+
+                                                    <!-- Edit Teacher Modal -->
+                                                    <div
+                                                        class="modal fade text-start"
+                                                        id="editTeacherModal{{ teacher.id }}"
+                                                        tabindex="-1"
+                                                        aria-labelledby="editTeacherModalLabel{{ teacher.id }}"
+                                                        aria-hidden="true"
+                                                    >
+                                                        <div class="modal-dialog modal-dialog-centered">
+                                                            <div class="modal-content border-0 shadow">
+                                                                <div class="modal-header bg-light">
+                                                                    <h5 class="modal-title fw-bold" id="editTeacherModalLabel{{ teacher.id }}">
+                                                                        ✏️ Edit Faculty Member: <span class="text-primary">{{ teacher.name }}</span>
+                                                                    </h5>
+                                                                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                                                                </div>
+                                                                <form action="{{ url_for('edit_teacher', teacher_id=teacher.id) }}" method="POST" autocomplete="off">
+                                                                    <input type="hidden" name="teacher_id" value="{{ teacher.id }}">
+                                                                    <div class="modal-body">
+                                                                        <div class="mb-3">
+                                                                            <label for="edit_teacher_name_{{ teacher.id }}" class="form-label fw-semibold">
+                                                                                Teacher Name <span class="text-danger">*</span>
+                                                                            </label>
+                                                                            <input
+                                                                                type="text"
+                                                                                class="form-control"
+                                                                                id="edit_teacher_name_{{ teacher.id }}"
+                                                                                name="name"
+                                                                                value="{{ teacher.name }}"
+                                                                                maxlength="100"
+                                                                                required
+                                                                            >
+                                                                            <div class="form-text">Full name of the faculty member.</div>
+                                                                        </div>
+
+                                                                        <div class="mb-3">
+                                                                            <label for="edit_teacher_email_{{ teacher.id }}" class="form-label fw-semibold">
+                                                                                Email Address <span class="text-muted small fw-normal">(Optional)</span>
+                                                                            </label>
+                                                                            <input
+                                                                                type="email"
+                                                                                class="form-control"
+                                                                                id="edit_teacher_email_{{ teacher.id }}"
+                                                                                name="email"
+                                                                                value="{{ teacher.email or '' }}"
+                                                                                maxlength="100"
+                                                                            >
+                                                                            <div class="form-text">Optional. Must be unique across faculty members if provided.</div>
+                                                                        </div>
+
+                                                                        <div class="mb-3">
+                                                                            <label for="edit_teacher_subjects_{{ teacher.id }}" class="form-label fw-semibold">
+                                                                                Qualified Subjects
+                                                                            </label>
+                                                                            {% if subjects %}
+                                                                                <select
+                                                                                    class="form-select"
+                                                                                    id="edit_teacher_subjects_{{ teacher.id }}"
+                                                                                    name="subject_ids"
+                                                                                    multiple
+                                                                                    size="5"
+                                                                                >
+                                                                                    {% for subject in subjects %}
+                                                                                        <option
+                                                                                            value="{{ subject.id }}"
+                                                                                            {% if subject.id in teacher.subject_ids %}selected{% endif %}
+                                                                                        >
+                                                                                            {{ subject.code }} - {{ subject.name }}
+                                                                                        </option>
+                                                                                    {% endfor %}
+                                                                                </select>
+                                                                                <div class="form-text">Hold <kbd>Ctrl</kbd> (Windows) or <kbd>Cmd</kbd> (Mac) to select multiple. Deselecting a subject will unassign that qualification.</div>
+                                                                            {% else %}
+                                                                                <p class="text-muted small fst-italic">No subjects created yet. Add subjects in the Subjects tab first.</p>
+                                                                            {% endif %}
+                                                                        </div>
+                                                                    </div>
+                                                                    <div class="modal-footer bg-light">
+                                                                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                                                                        <button type="submit" class="btn btn-primary fw-semibold">Save Changes</button>
+                                                                    </div>
+                                                                </form>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+
+                                                    <!-- Delete Teacher Modal -->
+                                                    <div
+                                                        class="modal fade text-start"
+                                                        id="deleteTeacherModal{{ teacher.id }}"
+                                                        tabindex="-1"
+                                                        aria-labelledby="deleteTeacherModalLabel{{ teacher.id }}"
+                                                        aria-hidden="true"
+                                                    >
+                                                        <div class="modal-dialog modal-dialog-centered">
+                                                            <div class="modal-content border-0 shadow">
+                                                                <div class="modal-header bg-danger-subtle text-danger-emphasis">
+                                                                    <h5 class="modal-title fw-bold" id="deleteTeacherModalLabel{{ teacher.id }}">
+                                                                        ⚠️ Confirm Delete Teacher
+                                                                    </h5>
+                                                                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                                                                </div>
+                                                                <form action="{{ url_for('delete_teacher', teacher_id=teacher.id) }}" method="POST">
+                                                                    <input type="hidden" name="teacher_id" value="{{ teacher.id }}">
+                                                                    <div class="modal-body">
+                                                                        <p class="mb-3">
+                                                                            Are you sure you want to delete faculty member
+                                                                            <strong class="text-dark">{{ teacher.name }}</strong>
+                                                                            {% if teacher.email %}(<span class="font-monospace text-secondary">{{ teacher.email }}</span>){% endif %}?
+                                                                        </p>
+
+                                                                        {% if teacher.subjects or teacher.timetable_count > 0 %}
+                                                                            <div class="alert alert-warning border-warning small mb-3">
+                                                                                <h6 class="alert-heading fw-bold mb-1">Consequences of Deletion:</h6>
+                                                                                <p class="mb-2">Deleting this faculty member will safely remove all related records in an atomic transaction:</p>
+                                                                                <ul class="mb-2 ps-3">
+                                                                                    {% if teacher.subjects %}
+                                                                                        <li><strong>{{ teacher.subjects|length }}</strong> subject qualification(s) will be unlinked ({{ teacher.subjects|map(attribute='code')|join(', ') }}).</li>
+                                                                                    {% endif %}
+                                                                                    {% if teacher.timetable_count > 0 %}
+                                                                                        <li><strong>{{ teacher.timetable_count }}</strong> scheduled class period(s) assigned to this teacher in the routine will be deleted.</li>
+                                                                                    {% endif %}
+                                                                                </ul>
+                                                                                {% if teacher.timetable_count > 0 %}
+                                                                                    <div class="text-danger fw-semibold">
+                                                                                        ⚠️ The published timetable will be marked outdated and must be regenerated.
+                                                                                    </div>
+                                                                                {% endif %}
+                                                                            </div>
+                                                                        {% else %}
+                                                                            <div class="alert alert-light border small text-muted mb-0">
+                                                                                ℹ️ This faculty member has no assigned qualifications or routine entries. They can be safely deleted.
+                                                                            </div>
+                                                                        {% endif %}
+                                                                    </div>
+                                                                    <div class="modal-footer bg-light">
+                                                                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                                                                        <button type="submit" class="btn btn-danger fw-semibold">
+                                                                            Yes, Delete Teacher
+                                                                        </button>
+                                                                    </div>
+                                                                </form>
+                                                            </div>
+                                                        </div>
+                                                    </div>
                                                 </td>
                                             </tr>
                                         {% endfor %}
