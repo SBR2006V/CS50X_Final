@@ -90,6 +90,7 @@ class TestSchedulerAlgorithm(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertEqual(result.entries, [])
+        assert result.error is not None
         self.assertIn("No qualified teacher available", result.error)
         self.assertIn("CS101", result.error)
         self.assertIn("CSE-A", result.error)
@@ -258,6 +259,7 @@ class TestSchedulerAlgorithm(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertEqual(result.entries, [])
+        assert result.error is not None
         self.assertIn("exceeds the maximum limit of 30", result.error)
 
     def test_impossible_schedule_overloaded_single_teacher(self):
@@ -286,6 +288,7 @@ class TestSchedulerAlgorithm(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertEqual(result.entries, [])
+        assert result.error is not None
         self.assertIn("exceeding the maximum limit of 30", result.error)
 
     def test_full_30_period_schedule(self):
@@ -366,6 +369,7 @@ class TestSchedulerAlgorithm(unittest.TestCase):
             requirements=[],
         )
         self.assertFalse(result.success)
+        assert result.error is not None
         self.assertIn("No section requirements found", result.error)
 
     def test_database_integration_and_constraint_compatibility(self):

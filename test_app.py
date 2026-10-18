@@ -1221,6 +1221,219 @@ class TestAppRoutesAndSubjects(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         self.assertIn(b"Teacher not found", res.data)
 
+    def test_edit_teacher_via_form_body_teacher_id(self):
+        """POST /teachers/edit with teacher_id in form payload should successfully update teacher."""
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                t_id = conn.execute("INSERT INTO teachers (name, email) VALUES ('Grace Hopper', 'grace@navy.mil');").lastrowid
+        finally:
+            conn.close()
+
+        response = self.client.post(
+            "/teachers/edit",
+            data={"teacher_id": str(t_id), "name": "Rear Adm. Grace Hopper", "email": "hopper@navy.mil"},
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"updated successfully", response.data)
+        self.assertIn(b"Rear Adm. Grace Hopper", response.data)
+
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            row = conn.execute("SELECT name, email FROM teachers WHERE id = ?;", (t_id,)).fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row["name"], "Rear Adm. Grace Hopper")
+            self.assertEqual(row["email"], "hopper@navy.mil")
+        finally:
+            conn.close()
+
+    def test_edit_teacher_invalid_teacher_id_string(self):
+        """POST /teachers/edit with non-numeric teacher_id should flash invalid teacher ID."""
+        response = self.client.post(
+            "/teachers/edit",
+            data={"teacher_id": "not-an-id", "name": "Fake Teacher"},
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Invalid teacher ID.", response.data)
+
+    def test_edit_teacher_nonexistent_subject_id_fails(self):
+        """POST /teachers/<id>/edit with non-existent subject_id should flash error and preserve qualifications."""
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                t_id = conn.execute("INSERT INTO teachers (name, email) VALUES ('Prof. Gauss', 'gauss@math.org');").lastrowid
+                s_id = conn.execute("INSERT INTO subjects (code, name) VALUES ('MATH201', 'Calculus II');").lastrowid
+                conn.execute("INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?);", (t_id, s_id))
+        finally:
+            conn.close()
+
+        response = self.client.post(
+            f"/teachers/{t_id}/edit",
+            data={"name": "Prof. Carl Gauss", "email": "gauss@math.org", "subject_ids": ["99999"]},
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"One or more selected subjects do not exist.", response.data)
+
+        # Existing qualification must remain intact
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            rows = conn.execute("SELECT subject_id FROM teacher_subjects WHERE teacher_id = ?;", (t_id,)).fetchall()
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["subject_id"], s_id)
+        finally:
+            conn.close()
+
+    def test_edit_teacher_invalid_subject_id_format_fails(self):
+        """POST /teachers/<id>/edit with non-numeric subject_id should flash invalid subject selection."""
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                t_id = conn.execute("INSERT INTO teachers (name) VALUES ('Prof. Hilbert');").lastrowid
+        finally:
+            conn.close()
+
+        response = self.client.post(
+            f"/teachers/{t_id}/edit",
+            data={"name": "Prof. David Hilbert", "subject_ids": ["abc-invalid"]},
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Invalid subject selection.", response.data)
+
+    def test_delete_teacher_via_form_body_teacher_id(self):
+        """POST /teachers/delete with teacher_id in form payload should successfully delete teacher."""
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                t_id = conn.execute("INSERT INTO teachers (name) VALUES ('Prof. Dirichlet');").lastrowid
+        finally:
+            conn.close()
+
+        response = self.client.post(
+            "/teachers/delete",
+            data={"teacher_id": str(t_id)},
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"deleted successfully", response.data)
+
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            row = conn.execute("SELECT * FROM teachers WHERE id = ?;", (t_id,)).fetchone()
+            self.assertIsNone(row)
+        finally:
+            conn.close()
+
+    def test_delete_teacher_invalid_teacher_id_string(self):
+        """POST /teachers/delete with non-numeric teacher_id should flash invalid teacher ID."""
+        response = self.client.post(
+            "/teachers/delete",
+            data={"teacher_id": "not-valid-id"},
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Invalid teacher ID.", response.data)
+
+    def test_edit_teacher_preserving_scheduled_qualifications_does_not_mark_timetable_outdated(self):
+        """
+        When editing a teacher removes an unscheduled qualification (leaving scheduled qualifications intact),
+        the timetable should remain valid and up-to-date.
+        """
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                s1 = conn.execute("INSERT INTO subjects (code, name) VALUES ('CS101', 'Intro to CS');").lastrowid
+                s2 = conn.execute("INSERT INTO subjects (code, name) VALUES ('CS102', 'Data Structures');").lastrowid
+                t_id = conn.execute("INSERT INTO teachers (name, email) VALUES ('Dr. Turing', 'alan@ai.org');").lastrowid
+                sec = conn.execute("INSERT INTO sections (name) VALUES ('SEC-A');").lastrowid
+                conn.execute("INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?);", (t_id, s1))
+                conn.execute("INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?);", (t_id, s2))
+                # Only CS101 is required and will be scheduled
+                conn.execute("INSERT INTO section_requirements (section_id, subject_id, weekly_periods) VALUES (?, ?, 2);", (sec, s1))
+        finally:
+            conn.close()
+
+        # Generate routine -> only CS101 is scheduled
+        res_gen = self.client.post("/routine/generate", follow_redirects=True)
+        self.assertEqual(res_gen.status_code, 200)
+        self.assertIn(b"Published &amp; Up to Date", res_gen.data)
+
+        # Edit teacher: keep s1 (CS101), drop s2 (CS102) which was never scheduled
+        res_edit = self.client.post(
+            f"/teachers/{t_id}/edit",
+            data={"name": "Dr. Alan Turing", "email": "alan@ai.org", "subject_ids": [str(s1)]},
+            follow_redirects=True,
+        )
+        self.assertEqual(res_edit.status_code, 200)
+        self.assertIn(b"updated successfully", res_edit.data)
+
+        # Timetable should still be Up to Date!
+        res_routine = self.client.get("/routine")
+        self.assertEqual(res_routine.status_code, 200)
+        self.assertIn(b"Published &amp; Up to Date", res_routine.data)
+        self.assertNotIn(b"Outdated Timetable", res_routine.data)
+
+    def test_teacher_change_does_not_silently_publish_new_timetable_until_regenerated(self):
+        """
+        Verify that deleting a scheduled teacher marks timetable outdated, drops affected slots,
+        does NOT silently regenerate, and only regenerates upon explicit user action.
+        """
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                sub1 = conn.execute("INSERT INTO subjects (code, name) VALUES ('CS101', 'Intro to CS');").lastrowid
+                t1 = conn.execute("INSERT INTO teachers (name, email) VALUES ('Teacher 1', 't1@uni.edu');").lastrowid
+                t2 = conn.execute("INSERT INTO teachers (name, email) VALUES ('Teacher 2', 't2@uni.edu');").lastrowid
+                sec = conn.execute("INSERT INTO sections (name) VALUES ('BATCH-X');").lastrowid
+                conn.execute("INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?);", (t1, sub1))
+                conn.execute("INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?);", (t2, sub1))
+                conn.execute("INSERT INTO section_requirements (section_id, subject_id, weekly_periods) VALUES (?, ?, 2);", (sec, sub1))
+        finally:
+            conn.close()
+
+        # Generate routine initially
+        res_gen = self.client.post("/routine/generate", follow_redirects=True)
+        self.assertEqual(res_gen.status_code, 200)
+
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            t1_entries = conn.execute("SELECT COUNT(*) AS c FROM timetable_entries WHERE teacher_id = ?;", (t1,)).fetchone()["c"]
+            self.assertGreater(t1_entries, 0)
+        finally:
+            conn.close()
+
+        # Delete teacher 1
+        res_del = self.client.post(f"/teachers/{t1}/delete", follow_redirects=True)
+        self.assertEqual(res_del.status_code, 200)
+
+        # 1. Timetable is outdated and has fewer entries than required (NOT silently regenerated)
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            current_entries_count = conn.execute("SELECT COUNT(*) AS c FROM timetable_entries;").fetchone()["c"]
+            self.assertEqual(current_entries_count, 2 - t1_entries)
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM timetable_entries WHERE teacher_id = ?;", (t1,)).fetchone()["c"], 0)
+        finally:
+            conn.close()
+
+        res_routine = self.client.get("/routine")
+        self.assertIn(b"Outdated Timetable", res_routine.data)
+        self.assertIn(b"Regenerate Routine", res_routine.data)
+
+        # 2. Only after explicit Regenerate Routine is clicked, routine is re-published with remaining teacher
+        res_regen = self.client.post("/routine/generate", follow_redirects=True)
+        self.assertEqual(res_regen.status_code, 200)
+        self.assertIn(b"Published &amp; Up to Date", res_regen.data)
+
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            new_entries_count = conn.execute("SELECT COUNT(*) AS c FROM timetable_entries;").fetchone()["c"]
+            self.assertEqual(new_entries_count, 2)
+        finally:
+            conn.close()
+
     # =========================================================================
     # Step 2D Tests: Section Management & Weekly Subject Requirements
     # =========================================================================

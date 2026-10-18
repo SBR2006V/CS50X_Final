@@ -421,7 +421,8 @@ def edit_teacher(teacher_id: int | None = None):
         try:
             selected_subject_ids.append(int(s_raw))
         except (ValueError, TypeError):
-            pass
+            flash("Invalid subject selection.", "danger")
+            return redirect(url_for("setup", tab="teachers"))
     selected_subject_ids = list(dict.fromkeys(selected_subject_ids))
 
     if selected_subject_ids:

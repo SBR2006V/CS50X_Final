@@ -215,6 +215,45 @@ class TestDatabaseSchema(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_teacher_foreign_key_cascade_deletion(self):
+        """
+        Verify that deleting a teacher cascades to delete dependent records
+        in teacher_subjects and timetable_entries under foreign key constraints.
+        """
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                t_id = conn.execute("INSERT INTO teachers (name, email) VALUES ('Dr. Turing', 'turing@ai.org');").lastrowid
+                sub_id = conn.execute("INSERT INTO subjects (code, name) VALUES ('CS101', 'Intro to CS');").lastrowid
+                sec_id = conn.execute("INSERT INTO sections (name) VALUES ('Section A');").lastrowid
+                conn.execute("INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?);", (t_id, sub_id))
+                conn.execute(
+                    """
+                    INSERT INTO timetable_entries (section_id, teacher_id, subject_id, day_of_week, period)
+                    VALUES (?, ?, ?, 'Monday', 1);
+                    """,
+                    (sec_id, t_id, sub_id),
+                )
+
+            # Verify rows exist before deletion
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM teachers WHERE id = ?;", (t_id,)).fetchone()["c"], 1)
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM teacher_subjects WHERE teacher_id = ?;", (t_id,)).fetchone()["c"], 1)
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM timetable_entries WHERE teacher_id = ?;", (t_id,)).fetchone()["c"], 1)
+
+            # Delete teacher
+            with conn:
+                conn.execute("DELETE FROM teachers WHERE id = ?;", (t_id,))
+
+            # Verify cascade deletion took place
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM teachers WHERE id = ?;", (t_id,)).fetchone()["c"], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM teacher_subjects WHERE teacher_id = ?;", (t_id,)).fetchone()["c"], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM timetable_entries WHERE teacher_id = ?;", (t_id,)).fetchone()["c"], 0)
+            # Subject and section should remain intact
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM subjects WHERE id = ?;", (sub_id,)).fetchone()["c"], 1)
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM sections WHERE id = ?;", (sec_id,)).fetchone()["c"], 1)
+        finally:
+            conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()
