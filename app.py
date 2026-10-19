@@ -146,6 +146,12 @@ def setup():
             "weekly_periods": row["weekly_periods"],
         })
 
+    # Query scheduled timetable entries count per section
+    section_tt_rows = db.execute(
+        "SELECT section_id, COUNT(*) AS count FROM timetable_entries GROUP BY section_id;"
+    ).fetchall()
+    section_tt_map = {row["section_id"]: row["count"] for row in section_tt_rows}
+
     # Build section objects with embedded requirements and total periods
     sections = []
     for sec in sections_rows:
@@ -153,6 +159,8 @@ def setup():
         sec_reqs = section_requirements_map.get(sec["id"], [])
         sec_dict["requirements"] = sec_reqs
         sec_dict["total_periods"] = sum(r["weekly_periods"] for r in sec_reqs)
+        sec_dict["timetable_count"] = section_tt_map.get(sec["id"], 0)
+        sec_dict["requirement_count"] = len(sec_reqs)
         sections.append(sec_dict)
 
     raw_tab = request.args.get("tab", "subjects").strip().lower()
@@ -694,6 +702,79 @@ def add_section():
         flash(f"Section '{name}' added successfully!", "success")
     except sqlite3.IntegrityError:
         flash(f"A section with name '{name}' already exists. Please choose a unique name.", "danger")
+
+    return redirect(url_for("setup", tab="sections"))
+
+
+@app.route("/sections/<int:section_id>/delete", methods=["POST"])
+@app.route("/sections/delete", methods=["POST"])
+def delete_section(section_id: int | None = None):
+    """
+    POST route to delete an existing student section (cohort).
+    Safely inspects and removes all dependent records in a single atomic transaction:
+      1. timetable_entries referencing this section
+      2. section_requirements referencing this section
+      3. the section record itself
+    Never leaves orphaned records and marks the timetable outdated if affected.
+    """
+    if section_id is None:
+        section_id_raw = request.form.get("section_id", "").strip()
+        try:
+            section_id = int(section_id_raw)
+        except (ValueError, TypeError):
+            flash("Invalid section ID.", "danger")
+            return redirect(url_for("setup", tab="sections"))
+
+    db = get_db()
+
+    # 1. Verify that the section exists
+    section = db.execute("SELECT id, name FROM sections WHERE id = ?;", (section_id,)).fetchone()
+    if not section:
+        flash("Section not found.", "danger")
+        return redirect(url_for("setup", tab="sections"))
+
+    name = section["name"]
+
+    # 2. Inspect dependent records
+    req_count = db.execute(
+        "SELECT COUNT(*) AS count FROM section_requirements WHERE section_id = ?;", (section_id,)
+    ).fetchone()["count"]
+    tt_count = db.execute(
+        "SELECT COUNT(*) AS count FROM timetable_entries WHERE section_id = ?;", (section_id,)
+    ).fetchone()["count"]
+
+    # 3. Explicit safe transaction deleting related records in dependency order
+    try:
+        with db:
+            if tt_count > 0:
+                db.execute("DELETE FROM timetable_entries WHERE section_id = ?;", (section_id,))
+            if req_count > 0:
+                db.execute("DELETE FROM section_requirements WHERE section_id = ?;", (section_id,))
+            db.execute("DELETE FROM sections WHERE id = ?;", (section_id,))
+
+        if req_count > 0 or tt_count > 0:
+            details = []
+            if req_count:
+                details.append(f"{req_count} section requirement(s)")
+            if tt_count:
+                details.append(f"{tt_count} timetable slot(s)")
+            flash(
+                f"Section '{name}' deleted successfully along with associated records ({', '.join(details)}).",
+                "warning",
+            )
+            if tt_count > 0:
+                session["timetable_outdated"] = True
+                reasons = session.get("outdated_reasons", [])
+                reasons.append(
+                    f"Section '{name}' was deleted, removing {tt_count} scheduled timetable period(s)."
+                )
+                session["outdated_reasons"] = reasons
+        else:
+            flash(f"Section '{name}' deleted successfully.", "success")
+
+    except Exception as e:
+        db.rollback()
+        flash(f"Database error while deleting section '{name}': {str(e)}", "danger")
 
     return redirect(url_for("setup", tab="sections"))
 

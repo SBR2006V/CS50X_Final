@@ -6,6 +6,7 @@ Uses Python's built-in unittest and Flask's test_client.
 import gc
 from pathlib import Path
 import re
+import sqlite3
 import unittest
 from unittest.mock import patch
 
@@ -1793,6 +1794,354 @@ class TestAppRoutesAndSubjects(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Sections", response.data)
         self.assertIn(b">2<", response.data)
+
+    def test_setup_sections_table_displays_delete_actions_and_modals(self):
+        """GET /setup?tab=sections should display Delete button and confirmation modal identifying section by name and explaining removal of associated records."""
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                sec_id = conn.execute("INSERT INTO sections (name) VALUES ('CSE-Alpha');").lastrowid
+                sub_id = conn.execute("INSERT INTO subjects (code, name) VALUES ('CS101', 'Intro to CS');").lastrowid
+                conn.execute("INSERT INTO section_requirements (section_id, subject_id, weekly_periods) VALUES (?, ?, 4);", (sec_id, sub_id))
+        finally:
+            conn.close()
+
+        response = self.client.get("/setup?tab=sections")
+        self.assertEqual(response.status_code, 200)
+        html = response.data.decode("utf-8")
+
+        self.assertIn("Actions", html)
+        self.assertIn("Delete", html)
+        self.assertIn(f"deleteSectionModal{sec_id}", html)
+        self.assertIn(f"/sections/{sec_id}/delete", html)
+        self.assertIn("CSE-Alpha", html)
+        self.assertIn("Consequences of Deletion", html)
+        self.assertIn("weekly subject requirement(s) will be removed", html)
+
+    def test_delete_section_no_subject_requirements_success(self):
+        """POST /sections/<id>/delete for a section with no subject requirements should delete section, decrement dashboard count, and flash success."""
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                sec_id = conn.execute("INSERT INTO sections (name) VALUES ('CSE-EMPTY');").lastrowid
+        finally:
+            conn.close()
+
+        # Dashboard shows 1 section
+        res_dash1 = self.client.get("/")
+        self.assertIn(b">1<", res_dash1.data)
+
+        # Delete section
+        response = self.client.post(f"/sections/{sec_id}/delete", follow_redirects=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"deleted successfully", response.data)
+        self.assertIn(b"CSE-EMPTY", response.data)
+
+        # Verify record is deleted from database
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            row = conn.execute("SELECT * FROM sections WHERE id = ?;", (sec_id,)).fetchone()
+            self.assertIsNone(row)
+        finally:
+            conn.close()
+
+        # Dashboard count decremented
+        res_dash2 = self.client.get("/")
+        self.assertIn(b">0<", res_dash2.data)
+
+    def test_delete_section_with_subject_requirements_removes_associated_records(self):
+        """POST /sections/<id>/delete for a section with subject requirements removes the section and all its requirements while preserving subjects."""
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                sec_id = conn.execute("INSERT INTO sections (name) VALUES ('CSE-REQS');").lastrowid
+                sub1_id = conn.execute("INSERT INTO subjects (code, name) VALUES ('CS101', 'Intro to CS');").lastrowid
+                sub2_id = conn.execute("INSERT INTO subjects (code, name) VALUES ('MATH101', 'Calculus');").lastrowid
+                conn.execute("INSERT INTO section_requirements (section_id, subject_id, weekly_periods) VALUES (?, ?, 4);", (sec_id, sub1_id))
+                conn.execute("INSERT INTO section_requirements (section_id, subject_id, weekly_periods) VALUES (?, ?, 3);", (sec_id, sub2_id))
+        finally:
+            conn.close()
+
+        response = self.client.post(f"/sections/{sec_id}/delete", follow_redirects=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"deleted successfully along with associated records", response.data)
+        self.assertIn(b"2 section requirement(s)", response.data)
+
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            # Section is gone
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM sections WHERE id = ?;", (sec_id,)).fetchone()["c"], 0)
+            # Section requirements are removed
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM section_requirements WHERE section_id = ?;", (sec_id,)).fetchone()["c"], 0)
+            # Subjects remain intact
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM subjects WHERE id IN (?, ?);", (sub1_id, sub2_id)).fetchone()["c"], 2)
+        finally:
+            conn.close()
+
+    def test_delete_section_with_timetable_entries_removes_associated_records(self):
+        """POST /sections/<id>/delete for a section with timetable entries removes the section, its requirements, and its timetable entries."""
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                sec_id = conn.execute("INSERT INTO sections (name) VALUES ('CSE-ROUTINE');").lastrowid
+                sub_id = conn.execute("INSERT INTO subjects (code, name) VALUES ('CS101', 'Intro to CS');").lastrowid
+                t_id = conn.execute("INSERT INTO teachers (name, email) VALUES ('Dr. Ada', 'ada@cs.edu');").lastrowid
+                conn.execute("INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?);", (t_id, sub_id))
+                conn.execute("INSERT INTO section_requirements (section_id, subject_id, weekly_periods) VALUES (?, ?, 4);", (sec_id, sub_id))
+        finally:
+            conn.close()
+
+        # Generate routine
+        res_gen = self.client.post("/routine/generate", follow_redirects=True)
+        self.assertEqual(res_gen.status_code, 200)
+
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM timetable_entries WHERE section_id = ?;", (sec_id,)).fetchone()["c"], 4)
+        finally:
+            conn.close()
+
+        # Delete section
+        response = self.client.post(f"/sections/{sec_id}/delete", follow_redirects=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"deleted successfully along with associated records", response.data)
+        self.assertIn(b"4 timetable slot(s)", response.data)
+
+        # Confirm associated records are removed
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM sections WHERE id = ?;", (sec_id,)).fetchone()["c"], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM section_requirements WHERE section_id = ?;", (sec_id,)).fetchone()["c"], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM timetable_entries WHERE section_id = ?;", (sec_id,)).fetchone()["c"], 0)
+            # Subject and teacher remain intact
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM subjects WHERE id = ?;", (sub_id,)).fetchone()["c"], 1)
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM teachers WHERE id = ?;", (t_id,)).fetchone()["c"], 1)
+        finally:
+            conn.close()
+
+    def test_delete_section_preserves_other_sections_and_their_records(self):
+        """Deleting one section leaves other sections, their requirements, and their timetable entries unchanged."""
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                sec_a = conn.execute("INSERT INTO sections (name) VALUES ('CSE-A');").lastrowid
+                sec_b = conn.execute("INSERT INTO sections (name) VALUES ('CSE-B');").lastrowid
+                sub = conn.execute("INSERT INTO subjects (code, name) VALUES ('CS101', 'Intro to CS');").lastrowid
+                t = conn.execute("INSERT INTO teachers (name) VALUES ('Dr. Turing');").lastrowid
+                conn.execute("INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?);", (t, sub))
+                conn.execute("INSERT INTO section_requirements (section_id, subject_id, weekly_periods) VALUES (?, ?, 3);", (sec_a, sub))
+                conn.execute("INSERT INTO section_requirements (section_id, subject_id, weekly_periods) VALUES (?, ?, 4);", (sec_b, sub))
+        finally:
+            conn.close()
+
+        # Generate routine -> 7 total entries (3 for A, 4 for B)
+        self.client.post("/routine/generate", follow_redirects=True)
+
+        # Delete section A
+        response = self.client.post(f"/sections/{sec_a}/delete", follow_redirects=True)
+        self.assertEqual(response.status_code, 200)
+
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            # Section A is deleted
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM sections WHERE id = ?;", (sec_a,)).fetchone()["c"], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM section_requirements WHERE section_id = ?;", (sec_a,)).fetchone()["c"], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM timetable_entries WHERE section_id = ?;", (sec_a,)).fetchone()["c"], 0)
+
+            # Section B and its records are completely intact!
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM sections WHERE id = ?;", (sec_b,)).fetchone()["c"], 1)
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM section_requirements WHERE section_id = ?;", (sec_b,)).fetchone()["c"], 1)
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM timetable_entries WHERE section_id = ?;", (sec_b,)).fetchone()["c"], 4)
+        finally:
+            conn.close()
+
+    def test_delete_section_rejects_invalid_or_nonexistent_id(self):
+        """POST /sections/delete or /sections/<id>/delete with invalid or nonexistent ID should flash error and not affect DB."""
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                sec_id = conn.execute("INSERT INTO sections (name) VALUES ('CSE-STAY');").lastrowid
+        finally:
+            conn.close()
+
+        # 1. Nonexistent section ID in URL path
+        res_nonexistent = self.client.post("/sections/99999/delete", follow_redirects=True)
+        self.assertEqual(res_nonexistent.status_code, 200)
+        self.assertIn(b"Section not found.", res_nonexistent.data)
+
+        # 2. Non-numeric section ID in form body
+        res_invalid_str = self.client.post("/sections/delete", data={"section_id": "invalid-id"}, follow_redirects=True)
+        self.assertEqual(res_invalid_str.status_code, 200)
+        self.assertIn(b"Invalid section ID.", res_invalid_str.data)
+
+        # 3. Empty section ID in form body
+        res_empty = self.client.post("/sections/delete", data={"section_id": ""}, follow_redirects=True)
+        self.assertEqual(res_empty.status_code, 200)
+        self.assertIn(b"Invalid section ID.", res_empty.data)
+
+        # Existing section still exists
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM sections WHERE id = ?;", (sec_id,)).fetchone()["c"], 1)
+        finally:
+            conn.close()
+
+    def test_delete_section_via_form_body_success(self):
+        """POST /sections/delete with valid section_id in form payload should delete the section."""
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                sec_id = conn.execute("INSERT INTO sections (name) VALUES ('CSE-FORM');").lastrowid
+        finally:
+            conn.close()
+
+        response = self.client.post("/sections/delete", data={"section_id": str(sec_id)}, follow_redirects=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"deleted successfully", response.data)
+        self.assertIn(b"CSE-FORM", response.data)
+
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            self.assertIsNone(conn.execute("SELECT * FROM sections WHERE id = ?;", (sec_id,)).fetchone())
+        finally:
+            conn.close()
+
+    def test_delete_section_failed_deletion_rolls_back_correctly(self):
+        """If an error occurs during section deletion transaction, the transaction rolls back cleanly preserving all records."""
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                sec_id = conn.execute("INSERT INTO sections (name) VALUES ('CSE-ROLLBACK');").lastrowid
+                sub_id = conn.execute("INSERT INTO subjects (code, name) VALUES ('CS101', 'Intro to CS');").lastrowid
+                t_id = conn.execute("INSERT INTO teachers (name) VALUES ('Dr. Turing');").lastrowid
+                conn.execute("INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?);", (t_id, sub_id))
+                conn.execute("INSERT INTO section_requirements (section_id, subject_id, weekly_periods) VALUES (?, ?, 2);", (sec_id, sub_id))
+                conn.execute(
+                    """
+                    INSERT INTO timetable_entries (section_id, teacher_id, subject_id, day_of_week, period)
+                    VALUES (?, ?, ?, 'Monday', 1);
+                    """,
+                    (sec_id, t_id, sub_id),
+                )
+        finally:
+            conn.close()
+
+        # Simulate database failure during transaction (e.g. error executing DELETE FROM sections)
+        real_get_db = app.view_functions["delete_section"].__globals__["get_db"]
+
+        class FailingConnectionProxy:
+            def __init__(self, target_conn):
+                self._conn = target_conn
+
+            def execute(self, sql, *args, **kwargs):
+                if "DELETE FROM sections" in sql:
+                    raise sqlite3.OperationalError("Simulated database failure during section deletion")
+                return self._conn.execute(sql, *args, **kwargs)
+
+            def rollback(self):
+                return self._conn.rollback()
+
+            def commit(self):
+                return self._conn.commit()
+
+            def close(self):
+                return self._conn.close()
+
+            def __enter__(self):
+                self._conn.__enter__()
+                return self
+
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                return self._conn.__exit__(exc_type, exc_val, exc_tb)
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+        with patch("app.get_db", side_effect=lambda: FailingConnectionProxy(real_get_db())):
+            response = self.client.post(f"/sections/{sec_id}/delete", follow_redirects=True)
+            self.assertEqual(response.status_code, 200)
+            self.assertIn(b"Database error while deleting section", response.data)
+            self.assertIn(b"Simulated database failure", response.data)
+
+        # Confirm transaction rolled back: section, requirement, and timetable entry all preserved!
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM sections WHERE id = ?;", (sec_id,)).fetchone()["c"], 1)
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM section_requirements WHERE section_id = ?;", (sec_id,)).fetchone()["c"], 1)
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM timetable_entries WHERE section_id = ?;", (sec_id,)).fetchone()["c"], 1)
+        finally:
+            conn.close()
+
+    def test_delete_section_marks_timetable_outdated_when_routine_exists(self):
+        """When a section scheduled in the timetable is deleted, the timetable must be marked Outdated and not automatically regenerated."""
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                sec1 = conn.execute("INSERT INTO sections (name) VALUES ('BATCH-1');").lastrowid
+                sec2 = conn.execute("INSERT INTO sections (name) VALUES ('BATCH-2');").lastrowid
+                sub = conn.execute("INSERT INTO subjects (code, name) VALUES ('CS101', 'Intro to CS');").lastrowid
+                t = conn.execute("INSERT INTO teachers (name, email) VALUES ('Dr. Turing', 'turing@ai.org');").lastrowid
+                conn.execute("INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?);", (t, sub))
+                conn.execute("INSERT INTO section_requirements (section_id, subject_id, weekly_periods) VALUES (?, ?, 2);", (sec1, sub))
+                conn.execute("INSERT INTO section_requirements (section_id, subject_id, weekly_periods) VALUES (?, ?, 3);", (sec2, sub))
+        finally:
+            conn.close()
+
+        # Generate routine -> initially published and up to date
+        res_gen = self.client.post("/routine/generate", follow_redirects=True)
+        self.assertEqual(res_gen.status_code, 200)
+        self.assertIn(b"Published &amp; Up to Date", res_gen.data)
+
+        # Delete Section 1
+        res_del = self.client.post(f"/sections/{sec1}/delete", follow_redirects=True)
+        self.assertEqual(res_del.status_code, 200)
+
+        # Check GET /routine -> Must display Outdated Timetable warning, never 'Published & Up to Date'
+        res_routine = self.client.get("/routine")
+        self.assertEqual(res_routine.status_code, 200)
+        self.assertIn(b"Outdated Timetable", res_routine.data)
+        self.assertIn(b"Timetable Outdated", res_routine.data)
+        self.assertIn(b"BATCH-1", res_routine.data)
+        self.assertNotIn(b"Published &amp; Up to Date", res_routine.data)
+
+        # Verify timetable entries were NOT silently wiped or regenerated: Batch 2 entries still remain (3 entries)
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM timetable_entries WHERE section_id = ?;", (sec2,)).fetchone()["c"], 3)
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM timetable_entries WHERE section_id = ?;", (sec1,)).fetchone()["c"], 0)
+        finally:
+            conn.close()
+
+        # Regenerating routine restores 'Published & Up to Date' for remaining setup
+        res_regen = self.client.post("/routine/generate", follow_redirects=True)
+        self.assertEqual(res_regen.status_code, 200)
+        self.assertIn(b"Published &amp; Up to Date", res_regen.data)
+
+    def test_delete_section_cannot_be_deleted_through_get_request(self):
+        """GET /sections/<id>/delete and GET /sections/delete must return 405 Method Not Allowed and not delete section."""
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                sec_id = conn.execute("INSERT INTO sections (name) VALUES ('CSE-SAFE');").lastrowid
+        finally:
+            conn.close()
+
+        # Attempt GET deletion via parameterized path
+        res_get_path = self.client.get(f"/sections/{sec_id}/delete")
+        self.assertEqual(res_get_path.status_code, 405)
+
+        # Attempt GET deletion via endpoint
+        res_get_endpoint = self.client.get("/sections/delete")
+        self.assertEqual(res_get_endpoint.status_code, 405)
+
+        # Section must still exist intact in database
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            row = conn.execute("SELECT * FROM sections WHERE id = ?;", (sec_id,)).fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row["name"], "CSE-SAFE")
+        finally:
+            conn.close()
 
     # =========================================================================
     # Step 3B Tests: Timetable Generation, Transactions, and Routine Views
