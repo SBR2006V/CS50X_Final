@@ -14,7 +14,14 @@ from xml.sax.saxutils import escape
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import landscape, letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import (
+    Flowable,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
 
 
 def generate_section_timetable_pdf(
@@ -181,7 +188,7 @@ def generate_section_timetable_pdf(
     )
 
     safe_section_name = escape(section_name)
-    elements = [
+    elements: list[Flowable] = [
         Paragraph("<b>Smart Routine Generator</b>", title_style),
         Spacer(1, 4),
         Paragraph(

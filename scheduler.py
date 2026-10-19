@@ -44,7 +44,7 @@ class ScheduleResult:
     """
 
     def __init__(self, success: bool, entries: Optional[List[dict]] = None, error: Optional[str] = None):
-        self.success = bool(success)
+        self.success = success
         self.entries = entries if (success and entries is not None) else []
         self.schedule = self.entries
         self.error = error
