@@ -2538,5 +2538,731 @@ class TestAppRoutesAndSubjects(unittest.TestCase):
         self.assertNotIn(b"Published &amp; Up to Date", res.data)
 
 
+class TestTimetablePdfExport(unittest.TestCase):
+    """
+    Comprehensive tests for the Timetable PDF Export feature:
+    - Valid section PDF export and downloading.
+    - PDF response content type and disposition download filename.
+    - Section-specific timetable data present in generated PDF.
+    - Data isolation between multiple sections in exported PDFs.
+    - Graceful handling of missing or invalid section IDs.
+    - Rejection of export when no timetable has been generated or for sections without entries.
+    - Timetable freshness enforcement: blocking export when timetable is outdated.
+    - Guarantee that PDF export does not modify timetable entries or invoke the scheduler.
+    - Strict HTTP GET enforcement (rejecting POST with 405 Method Not Allowed).
+    - UI rendering of Download PDF buttons and dropdowns on the Routine page.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        app.config["TESTING"] = True
+        app.config["DATABASE_PATH"] = TEST_DB_PATH
+        if TEST_DB_PATH.exists():
+            try:
+                TEST_DB_PATH.unlink()
+            except PermissionError:
+                pass
+        init_db(TEST_DB_PATH)
+
+    @classmethod
+    def tearDownClass(cls):
+        gc.collect()
+        if TEST_DB_PATH.exists():
+            try:
+                TEST_DB_PATH.unlink()
+            except PermissionError:
+                pass
+
+    def setUp(self):
+        self.client = app.test_client()
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                conn.execute("DELETE FROM timetable_entries;")
+                conn.execute("DELETE FROM section_requirements;")
+                conn.execute("DELETE FROM teacher_subjects;")
+                conn.execute("DELETE FROM sections;")
+                conn.execute("DELETE FROM teachers;")
+                conn.execute("DELETE FROM subjects;")
+        finally:
+            conn.close()
+
+    def _setup_single_section_routine(self):
+        """Helper to create Section CSE-A, Subject CS101, Teacher Dr. Ada, 4 periods, and publish routine."""
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                sec_id = conn.execute("INSERT INTO sections (name) VALUES ('CSE-A');").lastrowid
+                cs_id = conn.execute("INSERT INTO subjects (code, name) VALUES ('CS101', 'Intro to Computer Science');").lastrowid
+                t_id = conn.execute("INSERT INTO teachers (name, email) VALUES ('Dr. Ada Lovelace', 'ada@cs.edu');").lastrowid
+                conn.execute("INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?);", (t_id, cs_id))
+                conn.execute("INSERT INTO section_requirements (section_id, subject_id, weekly_periods) VALUES (?, ?, 4);", (sec_id, cs_id))
+        finally:
+            conn.close()
+
+        res = self.client.post("/routine/generate", follow_redirects=True)
+        self.assertEqual(res.status_code, 200)
+        return sec_id, cs_id, t_id
+
+    def test_export_valid_timetable_for_section(self):
+        """GET /routine/export/<id> should return 200 with PDF mimetype, attachment header, and correct layout data."""
+        sec_id, _, _ = self._setup_single_section_routine()
+
+        res = self.client.get(f"/routine/export/{sec_id}")
+        self.assertEqual(res.status_code, 200)
+
+        # 1. Correct headers
+        self.assertEqual(res.headers.get("Content-Type"), "application/pdf")
+        disposition = res.headers.get("Content-Disposition", "")
+        self.assertIn("attachment", disposition)
+        self.assertIn("Routine_Section_CSE-A.pdf", disposition)
+
+        # 2. PDF binary format validation
+        pdf_bytes = res.data
+        self.assertTrue(pdf_bytes.startswith(b"%PDF"), "Response is not a valid PDF binary")
+
+        # 3. Document contents
+        self.assertIn(b"Smart Routine Generator", pdf_bytes)
+        self.assertIn(b"CSE-A", pdf_bytes)
+        self.assertIn(b"CS101", pdf_bytes)
+        self.assertIn(b"Dr. Ada Lovelace", pdf_bytes)
+        self.assertIn(b"Monday", pdf_bytes)
+        self.assertIn(b"Period 1", pdf_bytes)
+        self.assertIn(b"Period 6", pdf_bytes)
+        self.assertIn(b"Free", pdf_bytes)
+
+    def test_export_pdf_via_query_parameter(self):
+        """GET /routine/export?section_id=<id> should successfully export the timetable."""
+        sec_id, _, _ = self._setup_single_section_routine()
+
+        res = self.client.get(f"/routine/export?section_id={sec_id}")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.headers.get("Content-Type"), "application/pdf")
+        self.assertIn("Routine_Section_CSE-A.pdf", res.headers.get("Content-Disposition", ""))
+        self.assertTrue(res.data.startswith(b"%PDF"))
+
+    def test_export_pdf_section_specific_data_isolation(self):
+        """Exported PDF should only contain data for the requested section and isolate it from other sections."""
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                sec_1 = conn.execute("INSERT INTO sections (name) VALUES ('Section-One');").lastrowid
+                sec_2 = conn.execute("INSERT INTO sections (name) VALUES ('Section-Two');").lastrowid
+                sub_1 = conn.execute("INSERT INTO subjects (code, name) VALUES ('CS101', 'Intro to CS');").lastrowid
+                sub_2 = conn.execute("INSERT INTO subjects (code, name) VALUES ('MATH201', 'Calculus');").lastrowid
+                t_1 = conn.execute("INSERT INTO teachers (name, email) VALUES ('Dr. Alan Turing', 'turing@cs.edu');").lastrowid
+                t_2 = conn.execute("INSERT INTO teachers (name, email) VALUES ('Dr. Carl Gauss', 'gauss@math.edu');").lastrowid
+                conn.execute("INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?);", (t_1, sub_1))
+                conn.execute("INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?);", (t_2, sub_2))
+                conn.execute("INSERT INTO section_requirements (section_id, subject_id, weekly_periods) VALUES (?, ?, 3);", (sec_1, sub_1))
+                conn.execute("INSERT INTO section_requirements (section_id, subject_id, weekly_periods) VALUES (?, ?, 3);", (sec_2, sub_2))
+        finally:
+            conn.close()
+
+        res_gen = self.client.post("/routine/generate", follow_redirects=True)
+        self.assertEqual(res_gen.status_code, 200)
+
+        # Export Section-One
+        res_one = self.client.get(f"/routine/export/{sec_1}")
+        self.assertEqual(res_one.status_code, 200)
+        self.assertIn(b"Section-One", res_one.data)
+        self.assertIn(b"CS101", res_one.data)
+        self.assertIn(b"Alan Turing", res_one.data)
+        self.assertNotIn(b"Section-Two", res_one.data)
+        self.assertNotIn(b"MATH201", res_one.data)
+        self.assertNotIn(b"Carl Gauss", res_one.data)
+
+        # Export Section-Two
+        res_two = self.client.get(f"/routine/export/{sec_2}")
+        self.assertEqual(res_two.status_code, 200)
+        self.assertIn(b"Section-Two", res_two.data)
+        self.assertIn(b"MATH201", res_two.data)
+        self.assertIn(b"Carl Gauss", res_two.data)
+        self.assertNotIn(b"Section-One", res_two.data)
+        self.assertNotIn(b"CS101", res_two.data)
+        self.assertNotIn(b"Alan Turing", res_two.data)
+
+    def test_export_pdf_missing_or_invalid_section_ids(self):
+        """Invalid, nonexistent, or missing section IDs should be rejected with flash error and redirected to /routine."""
+        self._setup_single_section_routine()
+
+        # 1. Nonexistent section ID
+        res_nonexistent = self.client.get("/routine/export/99999", follow_redirects=True)
+        self.assertEqual(res_nonexistent.status_code, 200)
+        self.assertIn(b"Section not found.", res_nonexistent.data)
+
+        # 2. Negative section ID
+        res_neg = self.client.get("/routine/export/-1", follow_redirects=True)
+        self.assertEqual(res_neg.status_code, 200)
+        self.assertIn(b"Invalid section ID provided for PDF export.", res_neg.data)
+
+        # 3. Zero section ID
+        res_zero = self.client.get("/routine/export/0", follow_redirects=True)
+        self.assertEqual(res_zero.status_code, 200)
+        self.assertIn(b"Invalid section ID provided for PDF export.", res_zero.data)
+
+        # 4. Non-numeric section ID via query param
+        res_str = self.client.get("/routine/export?section_id=invalid_text", follow_redirects=True)
+        self.assertEqual(res_str.status_code, 200)
+        self.assertIn(b"Invalid section ID provided for PDF export.", res_str.data)
+
+        # 5. Missing query parameter entirely
+        res_empty = self.client.get("/routine/export", follow_redirects=True)
+        self.assertEqual(res_empty.status_code, 200)
+        self.assertIn(b"Please select a section to export.", res_empty.data)
+
+    def test_export_pdf_when_no_timetable_generated(self):
+        """Export should be blocked with an informative message when no timetable has been generated yet."""
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                sec_id = conn.execute("INSERT INTO sections (name) VALUES ('CSE-NEW');").lastrowid
+        finally:
+            conn.close()
+
+        res = self.client.get(f"/routine/export/{sec_id}", follow_redirects=True)
+        self.assertEqual(res.status_code, 200)
+        self.assertIn(b"No timetable has been generated yet. Please generate the timetable before exporting.", res.data)
+
+    def test_export_pdf_blocked_when_timetable_is_outdated_by_requirements_change(self):
+        """When setup requirements change after generation, PDF export must be blocked with an outdated error."""
+        sec_id, _, _ = self._setup_single_section_routine()
+
+        # Alter requirements directly without regenerating timetable
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                conn.execute("UPDATE section_requirements SET weekly_periods = 8 WHERE section_id = ?;", (sec_id,))
+        finally:
+            conn.close()
+
+        res = self.client.get(f"/routine/export/{sec_id}", follow_redirects=True)
+        self.assertEqual(res.status_code, 200)
+        self.assertIn(b"Cannot export PDF: Timetable is outdated", res.data)
+        self.assertIn(b"Please regenerate the timetable first.", res.data)
+
+    def test_export_pdf_blocked_when_session_marks_timetable_outdated(self):
+        """When session marks timetable as outdated (e.g. deletion of a teacher/section), export must be blocked."""
+        sec_id, _, _ = self._setup_single_section_routine()
+
+        with self.client.session_transaction() as sess:
+            sess["timetable_outdated"] = True
+            sess["outdated_reasons"] = ["A section was deleted, invalidating timetable slots."]
+
+        res = self.client.get(f"/routine/export/{sec_id}", follow_redirects=True)
+        self.assertEqual(res.status_code, 200)
+        self.assertIn(b"Cannot export PDF: Timetable is outdated", res.data)
+        self.assertIn(b"Please regenerate the timetable first.", res.data)
+
+    def test_export_pdf_blocked_when_last_generation_failed(self):
+        """When the previous generation attempt failed, PDF export must be blocked."""
+        sec_id, _, _ = self._setup_single_section_routine()
+
+        with self.client.session_transaction() as sess:
+            sess["last_generation_error"] = "No qualified teacher available for subject PHY101"
+
+        res = self.client.get(f"/routine/export/{sec_id}", follow_redirects=True)
+        self.assertEqual(res.status_code, 200)
+        self.assertIn(b"Cannot export PDF: Timetable is outdated", res.data)
+        self.assertIn(b"Last generation attempt failed", res.data)
+
+    def test_export_pdf_does_not_modify_timetable_entries_or_trigger_scheduling(self):
+        """PDF export must be purely read-only: never invoke generate_schedule() or modify SQLite records."""
+        sec_id, _, _ = self._setup_single_section_routine()
+
+        # Capture exact database state before export
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            entries_before = conn.execute(
+                "SELECT id, section_id, teacher_id, subject_id, day_of_week, period FROM timetable_entries ORDER BY id;"
+            ).fetchall()
+            entries_before_list = [dict(r) for r in entries_before]
+            self.assertEqual(len(entries_before_list), 4)
+        finally:
+            conn.close()
+
+        # Patch generate_schedule in app to verify it is NEVER invoked during PDF export
+        with patch("app.generate_schedule", side_effect=RuntimeError("Scheduler was invoked during PDF export!")):
+            res = self.client.get(f"/routine/export/{sec_id}")
+            self.assertEqual(res.status_code, 200)
+            self.assertEqual(res.headers.get("Content-Type"), "application/pdf")
+
+        # Verify database state after export is completely untouched
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            entries_after = conn.execute(
+                "SELECT id, section_id, teacher_id, subject_id, day_of_week, period FROM timetable_entries ORDER BY id;"
+            ).fetchall()
+            entries_after_list = [dict(r) for r in entries_after]
+            self.assertEqual(entries_before_list, entries_after_list)
+        finally:
+            conn.close()
+
+    def test_export_pdf_post_request_rejected_with_405(self):
+        """PDF export is strictly a GET endpoint; POST requests must be rejected with 405 Method Not Allowed."""
+        sec_id, _, _ = self._setup_single_section_routine()
+
+        res = self.client.post(f"/routine/export/{sec_id}")
+        self.assertEqual(res.status_code, 405)
+
+    def test_routine_page_renders_download_pdf_button(self):
+        """Routine page should display the Download PDF button when a timetable is published."""
+        sec_id, _, _ = self._setup_single_section_routine()
+
+        res = self.client.get("/routine")
+        self.assertEqual(res.status_code, 200)
+        html = res.data.decode("utf-8")
+
+        self.assertIn("Download PDF", html)
+        self.assertIn(f"/routine/export/{sec_id}", html)
+
+    def test_routine_page_renders_disabled_download_pdf_when_outdated(self):
+        """Routine page should show disabled Download PDF button when the timetable is outdated."""
+        sec_id, _, _ = self._setup_single_section_routine()
+
+        # Invalidate freshness
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                conn.execute("UPDATE section_requirements SET weekly_periods = 10 WHERE section_id = ?;", (sec_id,))
+        finally:
+            conn.close()
+
+        res = self.client.get("/routine")
+        self.assertEqual(res.status_code, 200)
+        html = res.data.decode("utf-8")
+
+        self.assertIn("Download PDF", html)
+        self.assertIn("disabled", html)
+        self.assertIn("Timetable is outdated. Please regenerate before downloading PDF.", html)
+
+
+class TestSectionRequirementEditAndDelete(unittest.TestCase):
+    """
+    Comprehensive tests for editing and deleting individual section subject requirements:
+    - Editing an individual requirement's weekly period count.
+    - Resolving requirement ID from path or form body.
+    - Rejecting invalid period counts (non-integer, <= 0, > 30, empty).
+    - Enforcing cumulative 30-period section capacity limit on edit.
+    - Handling nonexistent or invalid requirement IDs gracefully.
+    - Marking timetable as outdated when editing affects the routine, while preserving entries.
+    - Deleting an individual requirement and verifying isolated removal (other requirements, subjects, sections untouched).
+    - Preserving existing timetable entries upon requirement deletion while tagging the timetable as outdated.
+    - Preventing GET requests from modifying data (405 Method Not Allowed).
+    - UI rendering of Edit and Delete buttons and modals beside each requirement.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        app.config["TESTING"] = True
+        app.config["DATABASE_PATH"] = TEST_DB_PATH
+        if TEST_DB_PATH.exists():
+            try:
+                TEST_DB_PATH.unlink()
+            except PermissionError:
+                pass
+        init_db(TEST_DB_PATH)
+
+    @classmethod
+    def tearDownClass(cls):
+        gc.collect()
+        if TEST_DB_PATH.exists():
+            try:
+                TEST_DB_PATH.unlink()
+            except PermissionError:
+                pass
+
+    def setUp(self):
+        self.client = app.test_client()
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                conn.execute("DELETE FROM timetable_entries;")
+                conn.execute("DELETE FROM section_requirements;")
+                conn.execute("DELETE FROM teacher_subjects;")
+                conn.execute("DELETE FROM sections;")
+                conn.execute("DELETE FROM teachers;")
+                conn.execute("DELETE FROM subjects;")
+        finally:
+            conn.close()
+
+    def _setup_section_and_requirements(self):
+        """Helper to create Section CSE-A with CS101 (4 periods) and MATH201 (6 periods)."""
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                sec_id = conn.execute("INSERT INTO sections (name) VALUES ('CSE-A');").lastrowid
+                sub1_id = conn.execute("INSERT INTO subjects (code, name) VALUES ('CS101', 'Intro to CS');").lastrowid
+                sub2_id = conn.execute("INSERT INTO subjects (code, name) VALUES ('MATH201', 'Calculus');").lastrowid
+                req1_id = conn.execute(
+                    "INSERT INTO section_requirements (section_id, subject_id, weekly_periods) VALUES (?, ?, 4);",
+                    (sec_id, sub1_id),
+                ).lastrowid
+                req2_id = conn.execute(
+                    "INSERT INTO section_requirements (section_id, subject_id, weekly_periods) VALUES (?, ?, 6);",
+                    (sec_id, sub2_id),
+                ).lastrowid
+        finally:
+            conn.close()
+        return sec_id, sub1_id, sub2_id, req1_id, req2_id
+
+    def test_edit_requirement_success(self):
+        """POST /requirements/<id>/edit should update weekly periods, recalculate section load, and flash success."""
+        sec_id, sub1_id, sub2_id, req1_id, req2_id = self._setup_section_and_requirements()
+
+        response = self.client.post(
+            f"/requirements/{req1_id}/edit",
+            data={"weekly_periods": "8"},
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Updated &#39;CS101&#39; requirement for Section &#39;CSE-A&#39; to 8 weekly period(s)", response.data)
+        self.assertIn(b"Total: 14/30 periods", response.data)
+
+        # Verify database record updated
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            row = conn.execute("SELECT weekly_periods FROM section_requirements WHERE id = ?;", (req1_id,)).fetchone()
+            self.assertEqual(row["weekly_periods"], 8)
+
+            # Other requirement unchanged
+            other_row = conn.execute("SELECT weekly_periods FROM section_requirements WHERE id = ?;", (req2_id,)).fetchone()
+            self.assertEqual(other_row["weekly_periods"], 6)
+        finally:
+            conn.close()
+
+    def test_edit_requirement_form_body_resolution(self):
+        """POST /requirements/edit with requirement_id in form body should correctly update the record."""
+        sec_id, sub1_id, sub2_id, req1_id, req2_id = self._setup_section_and_requirements()
+
+        response = self.client.post(
+            "/requirements/edit",
+            data={"requirement_id": str(req1_id), "weekly_periods": "5"},
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Updated &#39;CS101&#39; requirement", response.data)
+
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            row = conn.execute("SELECT weekly_periods FROM section_requirements WHERE id = ?;", (req1_id,)).fetchone()
+            self.assertEqual(row["weekly_periods"], 5)
+        finally:
+            conn.close()
+
+    def test_edit_requirement_rejects_invalid_period_counts(self):
+        """POST /requirements/<id>/edit should reject non-integer, <= 0, > 30, and empty weekly periods."""
+        sec_id, sub1_id, sub2_id, req1_id, req2_id = self._setup_section_and_requirements()
+
+        invalid_inputs = [
+            ("abc", b"Weekly periods must be a valid integer."),
+            ("0", b"Weekly periods must be between 1 and 30."),
+            ("-4", b"Weekly periods must be between 1 and 30."),
+            ("31", b"Weekly periods must be between 1 and 30."),
+            ("", b"Weekly periods count is required."),
+        ]
+
+        for val, expected_msg in invalid_inputs:
+            with self.subTest(val=val):
+                res = self.client.post(
+                    f"/requirements/{req1_id}/edit",
+                    data={"weekly_periods": val},
+                    follow_redirects=True,
+                )
+                self.assertEqual(res.status_code, 200)
+                self.assertIn(expected_msg, res.data)
+
+        # Database record should remain untouched at original 4 periods
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            row = conn.execute("SELECT weekly_periods FROM section_requirements WHERE id = ?;", (req1_id,)).fetchone()
+            self.assertEqual(row["weekly_periods"], 4)
+        finally:
+            conn.close()
+
+    def test_edit_requirement_enforces_30_period_cumulative_limit(self):
+        """Editing requirement to exceed 30 periods across section should be rejected."""
+        sec_id, sub1_id, sub2_id, req1_id, req2_id = self._setup_section_and_requirements()
+
+        # Other requirement has 6 periods. Trying to set 25 periods -> 6 + 25 = 31 > 30
+        res = self.client.post(
+            f"/requirements/{req1_id}/edit",
+            data={"weekly_periods": "25"},
+            follow_redirects=True,
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertIn(b"Cannot set 25 periods", res.data)
+        self.assertIn(b"other requirements totaling 6/30 periods", res.data)
+        self.assertIn(b"Only 24 period(s) remaining", res.data)
+
+        # Confirm value was not updated
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            row = conn.execute("SELECT weekly_periods FROM section_requirements WHERE id = ?;", (req1_id,)).fetchone()
+            self.assertEqual(row["weekly_periods"], 4)
+        finally:
+            conn.close()
+
+    def test_edit_requirement_exact_30_periods_allowed(self):
+        """Editing requirement such that section reaches exactly 30 total periods should succeed."""
+        sec_id, sub1_id, sub2_id, req1_id, req2_id = self._setup_section_and_requirements()
+
+        # Other requirement has 6 periods. Setting 24 periods -> 6 + 24 = 30
+        res = self.client.post(
+            f"/requirements/{req1_id}/edit",
+            data={"weekly_periods": "24"},
+            follow_redirects=True,
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertIn(b"Total: 30/30 periods", res.data)
+
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            row = conn.execute("SELECT weekly_periods FROM section_requirements WHERE id = ?;", (req1_id,)).fetchone()
+            self.assertEqual(row["weekly_periods"], 24)
+        finally:
+            conn.close()
+
+    def test_edit_requirement_nonexistent_or_invalid_id(self):
+        """Editing nonexistent or invalid requirement IDs should flash error and redirect."""
+        res_nonexistent = self.client.post(
+            "/requirements/99999/edit",
+            data={"weekly_periods": "5"},
+            follow_redirects=True,
+        )
+        self.assertEqual(res_nonexistent.status_code, 200)
+        self.assertIn(b"Requirement not found.", res_nonexistent.data)
+
+        res_invalid_str = self.client.post(
+            "/requirements/edit",
+            data={"requirement_id": "invalid_id", "weekly_periods": "5"},
+            follow_redirects=True,
+        )
+        self.assertEqual(res_invalid_str.status_code, 200)
+        self.assertIn(b"Invalid requirement ID.", res_invalid_str.data)
+
+        res_negative = self.client.post(
+            "/requirements/edit",
+            data={"requirement_id": "-5", "weekly_periods": "5"},
+            follow_redirects=True,
+        )
+        self.assertEqual(res_negative.status_code, 200)
+        self.assertIn(b"Invalid requirement ID.", res_negative.data)
+
+    def test_edit_requirement_marks_timetable_outdated_and_preserves_entries(self):
+        """When an edited requirement affects a published timetable, the timetable must be marked outdated and entries preserved."""
+        sec_id, sub1_id, sub2_id, req1_id, req2_id = self._setup_section_and_requirements()
+
+        # Add teacher qualified for both subjects
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                t_id = conn.execute("INSERT INTO teachers (name, email) VALUES ('Dr. Ada', 'ada@cs.edu');").lastrowid
+                conn.execute("INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?);", (t_id, sub1_id))
+                conn.execute("INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?);", (t_id, sub2_id))
+        finally:
+            conn.close()
+
+        # Generate routine -> 10 total periods (4 + 6)
+        res_gen = self.client.post("/routine/generate", follow_redirects=True)
+        self.assertEqual(res_gen.status_code, 200)
+        self.assertIn(b"Published &amp; Up to Date", res_gen.data)
+
+        # Edit CS101 requirement from 4 to 7 periods
+        res_edit = self.client.post(
+            f"/requirements/{req1_id}/edit",
+            data={"weekly_periods": "7"},
+            follow_redirects=True,
+        )
+        self.assertEqual(res_edit.status_code, 200)
+
+        # Timetable entries in DB must be preserved (still 10 rows)
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            entries_count = conn.execute("SELECT COUNT(*) AS total FROM timetable_entries;").fetchone()["total"]
+            self.assertEqual(entries_count, 10, "Existing timetable entries must be preserved until user regenerates!")
+        finally:
+            conn.close()
+
+        # Routine page should display Outdated Timetable warning
+        res_routine = self.client.get("/routine")
+        self.assertEqual(res_routine.status_code, 200)
+        self.assertIn(b"Outdated Timetable", res_routine.data)
+        self.assertNotIn(b"Published &amp; Up to Date", res_routine.data)
+
+        # PDF export must be blocked
+        res_pdf = self.client.get(f"/routine/export/{sec_id}", follow_redirects=True)
+        self.assertEqual(res_pdf.status_code, 200)
+        self.assertIn(b"Cannot export PDF: Timetable is outdated", res_pdf.data)
+
+    def test_delete_requirement_success_and_preserves_other_records(self):
+        """Deleting an individual requirement should remove only that record, preserving other requirements, subjects, and sections."""
+        sec_id, sub1_id, sub2_id, req1_id, req2_id = self._setup_section_and_requirements()
+
+        # Also add another section with requirements
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                sec2_id = conn.execute("INSERT INTO sections (name) VALUES ('CSE-B');").lastrowid
+                req_b_id = conn.execute(
+                    "INSERT INTO section_requirements (section_id, subject_id, weekly_periods) VALUES (?, ?, 4);",
+                    (sec2_id, sub1_id),
+                ).lastrowid
+        finally:
+            conn.close()
+
+        # Delete req1_id (CS101 in CSE-A)
+        response = self.client.post(f"/requirements/{req1_id}/delete", follow_redirects=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Removed requirement of 4 weekly period(s) of &#39;CS101&#39; from Section &#39;CSE-A&#39;.", response.data)
+
+        # Check DB state
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            # Deleted requirement is gone
+            r1 = conn.execute("SELECT * FROM section_requirements WHERE id = ?;", (req1_id,)).fetchone()
+            self.assertIsNone(r1)
+
+            # Other requirement for CSE-A still exists
+            r2 = conn.execute("SELECT * FROM section_requirements WHERE id = ?;", (req2_id,)).fetchone()
+            self.assertIsNotNone(r2)
+            self.assertEqual(r2["weekly_periods"], 6)
+
+            # Requirement for CSE-B still exists
+            rb = conn.execute("SELECT * FROM section_requirements WHERE id = ?;", (req_b_id,)).fetchone()
+            self.assertIsNotNone(rb)
+
+            # Both sections and subjects still exist
+            self.assertIsNotNone(conn.execute("SELECT * FROM sections WHERE id = ?;", (sec_id,)).fetchone())
+            self.assertIsNotNone(conn.execute("SELECT * FROM sections WHERE id = ?;", (sec2_id,)).fetchone())
+            self.assertIsNotNone(conn.execute("SELECT * FROM subjects WHERE id = ?;", (sub1_id,)).fetchone())
+            self.assertIsNotNone(conn.execute("SELECT * FROM subjects WHERE id = ?;", (sub2_id,)).fetchone())
+        finally:
+            conn.close()
+
+    def test_delete_requirement_form_body_resolution(self):
+        """POST /requirements/delete with requirement_id in form body should delete the record."""
+        sec_id, sub1_id, sub2_id, req1_id, req2_id = self._setup_section_and_requirements()
+
+        response = self.client.post(
+            "/requirements/delete",
+            data={"requirement_id": str(req1_id)},
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Removed requirement", response.data)
+
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            row = conn.execute("SELECT * FROM section_requirements WHERE id = ?;", (req1_id,)).fetchone()
+            self.assertIsNone(row)
+        finally:
+            conn.close()
+
+    def test_delete_requirement_nonexistent_or_invalid_id(self):
+        """Deleting nonexistent or invalid requirement IDs should flash error and redirect."""
+        res_nonexistent = self.client.post("/requirements/99999/delete", follow_redirects=True)
+        self.assertEqual(res_nonexistent.status_code, 200)
+        self.assertIn(b"Requirement not found.", res_nonexistent.data)
+
+        res_invalid_str = self.client.post(
+            "/requirements/delete",
+            data={"requirement_id": "not_an_int"},
+            follow_redirects=True,
+        )
+        self.assertEqual(res_invalid_str.status_code, 200)
+        self.assertIn(b"Invalid requirement ID.", res_invalid_str.data)
+
+        res_negative = self.client.post(
+            "/requirements/delete",
+            data={"requirement_id": "-1"},
+            follow_redirects=True,
+        )
+        self.assertEqual(res_negative.status_code, 200)
+        self.assertIn(b"Invalid requirement ID.", res_negative.data)
+
+    def test_delete_requirement_marks_timetable_outdated_and_preserves_entries(self):
+        """Deleting a requirement when a timetable is published should mark routine outdated while preserving timetable entries."""
+        sec_id, sub1_id, sub2_id, req1_id, req2_id = self._setup_section_and_requirements()
+
+        # Add teacher qualified for both subjects
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            with conn:
+                t_id = conn.execute("INSERT INTO teachers (name, email) VALUES ('Dr. Ada', 'ada@cs.edu');").lastrowid
+                conn.execute("INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?);", (t_id, sub1_id))
+                conn.execute("INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?);", (t_id, sub2_id))
+        finally:
+            conn.close()
+
+        # Generate routine -> 10 entries scheduled
+        self.client.post("/routine/generate", follow_redirects=True)
+
+        # Delete req1_id
+        res_del = self.client.post(f"/requirements/{req1_id}/delete", follow_redirects=True)
+        self.assertEqual(res_del.status_code, 200)
+
+        # Timetable entries are PRESERVED (still 10 rows)
+        conn = get_db_connection(TEST_DB_PATH)
+        try:
+            entries_count = conn.execute("SELECT COUNT(*) AS total FROM timetable_entries;").fetchone()["total"]
+            self.assertEqual(entries_count, 10, "Timetable entries must be preserved until user regenerates!")
+        finally:
+            conn.close()
+
+        # Routine page shows Outdated Timetable
+        res_routine = self.client.get("/routine")
+        self.assertEqual(res_routine.status_code, 200)
+        self.assertIn(b"Outdated Timetable", res_routine.data)
+
+        # PDF export blocked
+        res_pdf = self.client.get(f"/routine/export/{sec_id}", follow_redirects=True)
+        self.assertEqual(res_pdf.status_code, 200)
+        self.assertIn(b"Cannot export PDF: Timetable is outdated", res_pdf.data)
+
+    def test_edit_and_delete_requirement_reject_get_requests(self):
+        """GET requests to edit or delete requirement endpoints must return 405 Method Not Allowed."""
+        sec_id, sub1_id, sub2_id, req1_id, req2_id = self._setup_section_and_requirements()
+
+        # GET on item routes
+        res_edit = self.client.get(f"/requirements/{req1_id}/edit")
+        self.assertEqual(res_edit.status_code, 405)
+
+        res_del = self.client.get(f"/requirements/{req1_id}/delete")
+        self.assertEqual(res_del.status_code, 405)
+
+        # GET on base routes
+        res_edit_base = self.client.get("/requirements/edit")
+        self.assertEqual(res_edit_base.status_code, 405)
+
+        res_del_base = self.client.get("/requirements/delete")
+        self.assertEqual(res_del_base.status_code, 405)
+
+    def test_ui_renders_edit_and_delete_controls_for_individual_requirements(self):
+        """Academic setup page should display Edit and Delete controls and modals beside each requirement."""
+        sec_id, sub1_id, sub2_id, req1_id, req2_id = self._setup_section_and_requirements()
+
+        res = self.client.get("/setup?tab=sections")
+        self.assertEqual(res.status_code, 200)
+        html = res.data.decode("utf-8")
+
+        # Edit button and modal for req1_id
+        self.assertIn(f"editRequirementModal{req1_id}", html)
+        self.assertIn(f"/requirements/{req1_id}/edit", html)
+        self.assertIn("Weekly Periods", html)
+
+        # Delete button and modal for req1_id
+        self.assertIn(f"deleteRequirementModal{req1_id}", html)
+        self.assertIn(f"/requirements/{req1_id}/delete", html)
+        self.assertIn("Are you sure you want to remove the requirement of", html)
+        self.assertIn("CS101", html)
+        self.assertIn("CSE-A", html)
+
+        # Modals for req2_id also present
+        self.assertIn(f"editRequirementModal{req2_id}", html)
+        self.assertIn(f"deleteRequirementModal{req2_id}", html)
+        self.assertIn("MATH201", html)
+
+
 if __name__ == "__main__":
     unittest.main()

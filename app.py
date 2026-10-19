@@ -6,12 +6,14 @@ Step 3B: Automated timetable generation, transaction rollback, and routine displ
 """
 
 import os
+import re
 import sqlite3
 from typing import Any
 
-from flask import Flask, flash, g, has_request_context, redirect, render_template, request, session, url_for
+from flask import Flask, flash, g, has_request_context, redirect, render_template, request, send_file, session, url_for
 
 from database import DATABASE_PATH, get_db_connection
+from pdf_generator import generate_section_timetable_pdf
 from scheduler import DAYS, PERIODS, generate_schedule
 
 app = Flask(__name__)
@@ -895,6 +897,212 @@ def add_requirement():
     return redirect(url_for("setup", tab="sections"))
 
 
+@app.route("/section-requirements/edit", methods=["POST"])
+@app.route("/section-requirements/<int:requirement_id>/edit", methods=["POST"])
+@app.route("/requirements/edit", methods=["POST"])
+@app.route("/requirements/<int:requirement_id>/edit", methods=["POST"])
+def edit_requirement(requirement_id: int | None = None):
+    """
+    POST route to edit an existing section subject requirement.
+    Validates requirement ID, weekly period count (1-30), and enforces
+    the cumulative 30-period limit for the section across all other assigned subjects.
+    Marks timetable as outdated if affected without deleting existing timetable entries.
+    """
+    if requirement_id is None:
+        requirement_id_raw = request.form.get("requirement_id", "").strip()
+        try:
+            requirement_id = int(requirement_id_raw)
+        except (ValueError, TypeError):
+            flash("Invalid requirement ID.", "danger")
+            return redirect(url_for("setup", tab="sections"))
+
+    if requirement_id <= 0:
+        flash("Invalid requirement ID.", "danger")
+        return redirect(url_for("setup", tab="sections"))
+
+    db = get_db()
+
+    # 1. Verify requirement existence
+    req = db.execute(
+        """
+        SELECT sr.id, sr.section_id, sr.subject_id, sr.weekly_periods,
+               sec.name AS section_name, sub.code AS subject_code, sub.name AS subject_name
+        FROM section_requirements sr
+        JOIN sections sec ON sr.section_id = sec.id
+        JOIN subjects sub ON sr.subject_id = sub.id
+        WHERE sr.id = ?;
+        """,
+        (requirement_id,),
+    ).fetchone()
+
+    if not req:
+        flash("Requirement not found.", "danger")
+        return redirect(url_for("setup", tab="sections"))
+
+    section_id = req["section_id"]
+    old_weekly_periods = req["weekly_periods"]
+    section_name = req["section_name"]
+    subject_code = req["subject_code"]
+
+    # 2. Validate weekly periods input
+    weekly_periods_raw = request.form.get("weekly_periods", "").strip()
+    if not weekly_periods_raw:
+        flash("Weekly periods count is required.", "danger")
+        return redirect(url_for("setup", tab="sections"))
+
+    try:
+        new_weekly_periods = int(weekly_periods_raw)
+    except (ValueError, TypeError):
+        flash("Weekly periods must be a valid integer.", "danger")
+        return redirect(url_for("setup", tab="sections"))
+
+    if new_weekly_periods < 1 or new_weekly_periods > 30:
+        flash("Weekly periods must be between 1 and 30.", "danger")
+        return redirect(url_for("setup", tab="sections"))
+
+    # 3. Check cumulative 30-period limit for the section excluding this requirement
+    other_total = db.execute(
+        """
+        SELECT COALESCE(SUM(weekly_periods), 0) AS total
+        FROM section_requirements
+        WHERE section_id = ? AND id != ?;
+        """,
+        (section_id, requirement_id),
+    ).fetchone()["total"]
+
+    if other_total + new_weekly_periods > 30:
+        remaining = 30 - other_total
+        flash(
+            f"Cannot set {new_weekly_periods} periods. Section '{section_name}' has other requirements totaling {other_total}/30 periods. Only {remaining} period(s) remaining.",
+            "danger",
+        )
+        return redirect(url_for("setup", tab="sections"))
+
+    # 4. Check for duplicate requirement if subject is changed
+    subject_id_raw = request.form.get("subject_id", "").strip()
+    if subject_id_raw:
+        try:
+            new_subject_id = int(subject_id_raw)
+            if new_subject_id != req["subject_id"]:
+                duplicate = db.execute(
+                    "SELECT id FROM section_requirements WHERE section_id = ? AND subject_id = ? AND id != ?;",
+                    (section_id, new_subject_id, requirement_id),
+                ).fetchone()
+                if duplicate:
+                    flash(f"Section '{section_name}' is already assigned requirements for this subject.", "danger")
+                    return redirect(url_for("setup", tab="sections"))
+        except (ValueError, TypeError):
+            pass
+
+    # 5. Execute UPDATE query in an atomic transaction
+    try:
+        with db:
+            db.execute(
+                "UPDATE section_requirements SET weekly_periods = ? WHERE id = ?;",
+                (new_weekly_periods, requirement_id),
+            )
+
+        # Check timetable freshness
+        total_entries = db.execute("SELECT COUNT(*) AS count FROM timetable_entries;").fetchone()["count"]
+        if total_entries > 0 and old_weekly_periods != new_weekly_periods:
+            session["timetable_outdated"] = True
+            reasons = session.get("outdated_reasons", [])
+            reasons.append(
+                f"Requirement for '{subject_code}' in Section '{section_name}' was changed from {old_weekly_periods} to {new_weekly_periods} period(s)."
+            )
+            session["outdated_reasons"] = reasons
+
+        new_total = other_total + new_weekly_periods
+        flash(
+            f"Updated '{subject_code}' requirement for Section '{section_name}' to {new_weekly_periods} weekly period(s) (Total: {new_total}/30 periods).",
+            "success",
+        )
+    except Exception as e:
+        db.rollback()
+        flash(f"Database error while updating requirement: {str(e)}", "danger")
+
+    return redirect(url_for("setup", tab="sections"))
+
+
+@app.route("/section-requirements/delete", methods=["POST"])
+@app.route("/section-requirements/<int:requirement_id>/delete", methods=["POST"])
+@app.route("/requirements/delete", methods=["POST"])
+@app.route("/requirements/<int:requirement_id>/delete", methods=["POST"])
+def delete_requirement(requirement_id: int | None = None):
+    """
+    POST route to delete an individual section subject requirement.
+    Deletes only the specified section_requirements record without deleting
+    the section itself, the subject, or immediate timetable entries.
+    Marks the published timetable as outdated if affected.
+    """
+    if requirement_id is None:
+        requirement_id_raw = request.form.get("requirement_id", "").strip()
+        try:
+            requirement_id = int(requirement_id_raw)
+        except (ValueError, TypeError):
+            flash("Invalid requirement ID.", "danger")
+            return redirect(url_for("setup", tab="sections"))
+
+    if requirement_id <= 0:
+        flash("Invalid requirement ID.", "danger")
+        return redirect(url_for("setup", tab="sections"))
+
+    db = get_db()
+
+    # 1. Verify requirement existence
+    req = db.execute(
+        """
+        SELECT sr.id, sr.section_id, sr.subject_id, sr.weekly_periods,
+               sec.name AS section_name, sub.code AS subject_code, sub.name AS subject_name
+        FROM section_requirements sr
+        JOIN sections sec ON sr.section_id = sec.id
+        JOIN subjects sub ON sr.subject_id = sub.id
+        WHERE sr.id = ?;
+        """,
+        (requirement_id,),
+    ).fetchone()
+
+    if not req:
+        flash("Requirement not found.", "danger")
+        return redirect(url_for("setup", tab="sections"))
+
+    section_id = req["section_id"]
+    subject_id = req["subject_id"]
+    section_name = req["section_name"]
+    subject_code = req["subject_code"]
+    weekly_periods = req["weekly_periods"]
+
+    # 2. Execute DELETE query in an atomic transaction
+    try:
+        with db:
+            db.execute("DELETE FROM section_requirements WHERE id = ?;", (requirement_id,))
+
+        # Check timetable freshness
+        total_entries = db.execute("SELECT COUNT(*) AS count FROM timetable_entries;").fetchone()["count"]
+        sched_count = db.execute(
+            "SELECT COUNT(*) AS count FROM timetable_entries WHERE section_id = ? AND subject_id = ?;",
+            (section_id, subject_id),
+        ).fetchone()["count"]
+
+        if total_entries > 0 or sched_count > 0:
+            session["timetable_outdated"] = True
+            reasons = session.get("outdated_reasons", [])
+            reasons.append(
+                f"Requirement of {weekly_periods} weekly period(s) for '{subject_code}' in Section '{section_name}' was removed."
+            )
+            session["outdated_reasons"] = reasons
+
+        flash(
+            f"Removed requirement of {weekly_periods} weekly period(s) of '{subject_code}' from Section '{section_name}'.",
+            "warning",
+        )
+    except Exception as e:
+        db.rollback()
+        flash(f"Database error while deleting requirement: {str(e)}", "danger")
+
+    return redirect(url_for("setup", tab="sections"))
+
+
 def get_timetable_sync_status(db):
     """
     Check whether the saved timetable in timetable_entries matches
@@ -1142,6 +1350,107 @@ def generate_routine():
         flash(f"Database error while saving timetable: {str(e)}", "danger")
 
     return redirect(url_for("routine"))
+
+
+@app.route("/routine/export/<section_id>", methods=["GET"])
+@app.route("/routine/export", methods=["GET"])
+def export_section_pdf(section_id: Any = None):
+    """
+    GET route to export the generated weekly timetable for a given section as a PDF.
+    Validates the section ID, checks timetable freshness against the existing sync mechanism,
+    queries saved SQLite records without running the scheduler or modifying the database,
+    and returns a downloadable PDF document with secure response headers.
+    """
+    if section_id is None:
+        section_id_raw = request.args.get("section_id", "").strip()
+        if not section_id_raw:
+            flash("Please select a section to export.", "danger")
+            return redirect(url_for("routine"))
+    else:
+        section_id_raw = str(section_id).strip()
+
+    try:
+        validated_id = int(section_id_raw)
+        if validated_id <= 0:
+            raise ValueError("Section ID must be positive.")
+    except (ValueError, TypeError):
+        flash("Invalid section ID provided for PDF export.", "danger")
+        return redirect(url_for("routine"))
+
+    section_id = validated_id
+
+    db = get_db()
+
+    # 1. Verify section existence
+    section = db.execute("SELECT id, name FROM sections WHERE id = ?;", (section_id,)).fetchone()
+    if not section:
+        flash("Section not found.", "danger")
+        return redirect(url_for("routine"))
+
+    # 2. Check timetable freshness against existing sync mechanism
+    sync_status = get_timetable_sync_status(db)
+    if not sync_status["is_generated"]:
+        flash("No timetable has been generated yet. Please generate the timetable before exporting.", "warning")
+        return redirect(url_for("routine"))
+
+    last_generation_error = session.get("last_generation_error")
+    section_info = sync_status["section_status"].get(section_id, {})
+
+    if sync_status["is_outdated"] or last_generation_error or section_info.get("is_outdated"):
+        outdated_reasons = sync_status.get("outdated_reasons", [])
+        if last_generation_error:
+            reason_msg = f"Last generation attempt failed ({last_generation_error})"
+        elif outdated_reasons:
+            reason_msg = outdated_reasons[0]
+        else:
+            reason_msg = "Academic setup was modified after timetable generation"
+        flash(
+            f"Cannot export PDF: Timetable is outdated ({reason_msg}). Please regenerate the timetable first.",
+            "danger",
+        )
+        return redirect(url_for("routine"))
+
+    # 3. Read timetable entries for this section from SQLite (read-only query)
+    entries = db.execute(
+        """
+        SELECT te.day_of_week, te.period,
+               sub.code AS subject_code, sub.name AS subject_name,
+               t.name AS teacher_name
+        FROM timetable_entries te
+        JOIN teachers t ON te.teacher_id = t.id
+        JOIN subjects sub ON te.subject_id = sub.id
+        WHERE te.section_id = ?
+        ORDER BY te.day_of_week ASC, te.period ASC;
+        """,
+        (section_id,),
+    ).fetchall()
+
+    if not entries:
+        flash(f"No timetable entries found for Section '{section['name']}'. Please generate the timetable first.", "warning")
+        return redirect(url_for("routine"))
+
+    # 4. Generate in-memory PDF
+    try:
+        pdf_buffer = generate_section_timetable_pdf(
+            section_name=section["name"],
+            entries=entries,
+            days=DAYS,
+            periods=PERIODS,
+        )
+    except Exception as e:
+        flash(f"Error generating PDF: {str(e)}", "danger")
+        return redirect(url_for("routine"))
+
+    # 5. Sanitize filename and return as attachment
+    safe_name = re.sub(r"[^a-zA-Z0-9_\-]", "_", section["name"].strip())
+    filename = f"Routine_Section_{safe_name}.pdf"
+
+    return send_file(
+        pdf_buffer,
+        mimetype="application/pdf",
+        as_attachment=True,
+        download_name=filename,
+    )
 
 
 if __name__ == "__main__":

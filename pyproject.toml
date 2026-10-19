@@ -1,2 +1,2 @@
 [tool.pyrefly]
-search-path = ["."]
+search-path = [".", "C:/Users/USER/AppData/Roaming/Python/Python314/site-packages"]
