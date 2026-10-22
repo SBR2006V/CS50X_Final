@@ -31,6 +31,8 @@ Creating a timetable manually can be time-consuming, especially when several sec
 - `static/` contains the application's static assets, including CSS used to style the interface.
 - `routine.db` is the local SQLite database file used by the application, if included in the submitted project.
 - `test_app.py`, `test_db.py`, and `test_scheduler.py` contain tests for application routes and behavior, database operations, and scheduling logic, respectively.
+- `pdf_generator.py` generates downloadable PDF versions of section timetables using ReportLab.
+- `pyproject.toml` contains Python project and tool configuration.
 
 ### Design Choices
 
